@@ -265,7 +265,7 @@ async def _handle_multipart_request(req: Request, chat_service):
             file_ids=file_ids
         )
         
-        # NEW: Track uploaded file ID in Cosmos DB
+        # Track uploaded file IDs in Cosmos DB (session doc + artifact registry)
         if hasattr(chat_service.session_service, 'cosmos_service') and chat_service.session_service.cosmos_service:
             for file_id in file_ids:
                 try:
@@ -273,12 +273,13 @@ async def _handle_multipart_request(req: Request, chat_service):
                         session_id=session_id,
                         file_id=file_id,
                     )
-                    logging.info(f"📝 Tracked uploaded file ID in Cosmos DB: {file_id}")
-                    chat_service.session_service.cosmos_service.add_existing_files(
+                    chat_service.session_service.cosmos_service.log_artifact(
                         session_id=session_id,
-                        file_ids=file_ids,
+                        artifact_id=file_id,
+                        artifact_type="uploaded_file",
+                        metadata={"source": "user_upload"}
                     )
-                    logging.info(f"📝 Tracked existing file IDs in Cosmos DB for session: {session_id}")
+                    logging.info(f"📝 Tracked uploaded file ID in Cosmos DB + artifact registry: {file_id}")
                 except Exception as e:
                     logging.warning(f"⚠️ Failed to track uploaded file ID in Cosmos DB: {str(e)}")
         
