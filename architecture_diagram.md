@@ -225,14 +225,14 @@ classDiagram
         +str cosmos_endpoint
         +str database_name
         +str container_name
+        +str container_name_artifact_registry
         +CosmosClient cosmos_client
         +container
-        +container_files
-        +container_deletion
+        +container_artifact_registry
         +get_thread_id(session_id) Optional~str~
         +save_session(session_id, thread_id) None
         +add_uploaded_file(session_id, file_id, filename) None
-        +add_existing_files(session_id, file_ids) None
+        +log_artifact(session_id, artifact_id, artifact_type, metadata) None
         +add_generated_file(session_id, file_id, file_type, filename) None
         +get_session_files(session_id) Dict
         +log_interaction(session_id, thread_id, query, response, file_ids, execution_time) None
@@ -345,12 +345,12 @@ flowchart TD
     UPSERT --> PROCEED
 
     subgraph "Cosmos DB Containers"
-        C1["sessions container<br/>(session_mapping docs)"]
-        C2["files container<br/>(existing_files docs)"]
-        C3["deletion container<br/>(deletion job docs)"]
+        C1["threadssessions container<br/>(session_mapping docs)"]
+        C4["artifact_registry container<br/>(retention tracking, partition: /date)"]
     end
 
     UPSERT --> C1
+    COSMOS_SAVE -->|"log_artifact(thread_id, 'thread')"| C4
 ```
 
 ---
@@ -538,12 +538,17 @@ erDiagram
         string generated_at "ISO timestamp"
     }
 
-    EXISTING_FILES_DOC {
-        string id PK "session_id + timestamp"
-        string session_id
-        string file_ids "File IDs for deletion job"
-        string added_at "ISO timestamp"
-        string type "existing_files"
+    ARTIFACT_REGISTRY_DOC {
+        string id PK "artifact_id + timestamp_ms"
+        string session_id "Conversation/session ID"
+        string artifact_id "AI Foundry file_id or thread_id"
+        string artifact_type "uploaded_file | generated_file | thread"
+        string date "YYYY-MM-DD — PARTITION KEY"
+        string created_at "ISO timestamp"
+        object metadata "filename, file_type, source, etc."
+        string deletion_status "pending | deleted | failed"
+        string deleted_at "Set by deletion job"
+        string deletion_error "Set by deletion job if failed"
     }
 
     INTERACTION_LOG {
@@ -562,7 +567,41 @@ erDiagram
     SESSION_MAPPING ||--o{ UPLOADED_FILE_ENTRY : "uploaded_files[]"
     SESSION_MAPPING ||--o{ GENERATED_FILE_ENTRY : "generated_files[]"
     SESSION_MAPPING ||--o{ INTERACTION_LOG : "session_id"
-    SESSION_MAPPING ||--o{ EXISTING_FILES_DOC : "session_id"
+    SESSION_MAPPING ||--o{ ARTIFACT_REGISTRY_DOC : "session_id"
+```
+
+---
+
+## 10b. Artifact Registry — Retention & Deletion Design
+
+```mermaid
+flowchart TD
+    subgraph "Data Analyst Agent App (this app — WRITE ONLY)"
+        W1["save_session() → log_artifact(thread_id, 'thread')"]
+        W2["upload file → log_artifact(file_id, 'uploaded_file')"]
+        W3["AI generates file → log_artifact(file_id, 'generated_file')"]
+    end
+
+    subgraph "artifact_registry container<br/>(partition key: /date)"
+        DOC1["{ artifact_id: 'thread_abc',<br/>  artifact_type: 'thread',<br/>  date: '2026-02-26',<br/>  deletion_status: 'pending' }"]
+        DOC2["{ artifact_id: 'file_xyz',<br/>  artifact_type: 'uploaded_file',<br/>  date: '2026-02-26',<br/>  deletion_status: 'pending' }"]
+        DOC3["{ artifact_id: 'file_img',<br/>  artifact_type: 'generated_file',<br/>  date: '2026-02-26',<br/>  deletion_status: 'deleted' }"]
+    end
+
+    subgraph "Deletion Job (separate app — READ + UPDATE)"
+        DJ["Nightly job at 11:59 PM<br/>Query: SELECT * FROM c<br/>WHERE c.date = @today<br/>AND c.deletion_status = 'pending'"]
+        DEL["Delete file/thread from AI Foundry"]
+        UPD["Update doc: deletion_status = 'deleted'<br/>deleted_at = now()"]
+    end
+
+    W1 --> DOC1
+    W2 --> DOC2
+    W3 --> DOC3
+    DJ -->|"Single-partition query<br/>(fast, cheap)"| DOC1
+    DJ -->|"Single-partition query"| DOC2
+    DJ --> DEL
+    DEL --> UPD
+    UPD --> DOC3
 ```
 
 ---

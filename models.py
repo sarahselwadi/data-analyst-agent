@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
 from azure.ai.agents.models import CodeInterpreterTool, FilePurpose
-from azure.cosmos import CosmosClient
+from azure.cosmos import CosmosClient, PartitionKey
 from dotenv import load_dotenv
 from telemetry import create_custom_span, add_span_attributes, record_exception, create_correlation_context
 try:
@@ -534,15 +534,19 @@ Always save any charts or images you create to the current directory and provide
                                                 "filename": output_filename,
                                                 "session_id": session_id
                                             })
-                                            # Track generated file in Cosmos DB
+                                            # Track generated file in Cosmos DB (session doc + artifact registry)
                                             if hasattr(self, 'session_service') and self.session_service and session_id:
                                                 try:
                                                     file_type = 'image' if ext in ['.png', '.jpg', '.jpeg', '.svg'] else 'file_output'
                                                     self.session_service.cosmos_service.add_generated_file(
                                                         session_id, file_id, file_type, output_filename)
+                                                    self.session_service.cosmos_service.log_artifact(
+                                                        session_id=session_id,
+                                                        artifact_id=file_id,
+                                                        artifact_type="generated_file",
+                                                        metadata={"filename": output_filename, "file_type": file_type, "source": "text_annotation"}
+                                                    )
                                                     logging.info(f"📝 Tracked generated file ID in Cosmos DB: {file_id}")
-                                                    self.session_service.cosmos_service.add_existing_files(
-                                                        session_id=session_id, file_ids=file_id)
                                                 except Exception as track_err:
                                                     logging.error(f"Failed to track generated file {file_id} in Cosmos DB: {str(track_err)}")
                                         else:
@@ -597,14 +601,18 @@ Always save any charts or images you create to the current directory and provide
                                 "filename": image_filename,
                                 "session_id": session_id
                             })
-                            # Track in Cosmos DB
+                            # Track in Cosmos DB (session doc + artifact registry)
                             if hasattr(self, 'session_service') and self.session_service and session_id:
                                 try:
                                     self.session_service.cosmos_service.add_generated_file(
                                         session_id, file_id, "image", image_filename)
+                                    self.session_service.cosmos_service.log_artifact(
+                                        session_id=session_id,
+                                        artifact_id=file_id,
+                                        artifact_type="generated_file",
+                                        metadata={"filename": image_filename, "file_type": "image", "source": "ai_generated_image"}
+                                    )
                                     logging.info(f"📝 Tracked generated file ID in Cosmos DB: {file_id}")
-                                    self.session_service.cosmos_service.add_existing_files(
-                                        session_id=session_id, file_ids=file_id)
                                 except Exception as track_err:
                                     logging.error(f"Failed to track image file {file_id} in Cosmos DB: {str(track_err)}")
                         else:
@@ -1072,18 +1080,15 @@ class CosmosSessionService:
         self.database_name = os.getenv("COSMOS_DB_NAME") 
         self.container_name = os.getenv("COSMOS_CONTAINER_NAME")
 
-        #edits deletion job
-        self.container_name_files = os.getenv("COSMOS_CONTAINER_NAME_FILES")
-        self.container_name_deletion = os.getenv("COSMOS_CONTAINER_NAME_DELETION")
+        # Artifact registry container for unified file/thread retention tracking
+        self.container_name_artifact_registry = os.getenv("COSMOS_CONTAINER_NAME_ARTIFACT_REGISTRY", "artifact_registry")
 
-
-
-
-        # Initialize Cosmos client with DefaultAzureCredential and proper timeout configs
+        # Initialize Cosmos client with API key auth and proper timeout configs
+        self.cosmos_api_key = os.getenv("COSMOS_API_KEY")
         try:
             self.cosmos_client = CosmosClient(
                 url=self.cosmos_endpoint, 
-                credential=DefaultAzureCredential(),
+                credential=self.cosmos_api_key,
                 timeout=300,                    # Total operation timeout in seconds (5 minutes)
                 connection_timeout=60,          # HTTP connection establishment timeout
                 retry_total=3,                  # Maximum retry attempts
@@ -1096,15 +1101,26 @@ class CosmosSessionService:
                 consistency_level='Session'     # Use session consistency for better performance
             )
             
-            # Get database and container references deletion job
+            # Get database and container references
             self.database = self.cosmos_client.get_database_client(self.database_name)
             self.container = self.database.get_container_client(self.container_name)
 
-            self.container_files = self.database.get_container_client(self.container_name_files)
-            self.container_deletion = self.database.get_container_client(self.container_name_deletion)
+            # Artifact registry container (partition key: /date) — auto-create if missing
+            try:
+                self.database.create_container_if_not_exists(
+                    id=self.container_name_artifact_registry,
+                    partition_key=PartitionKey(path="/date")
+                )
+                logging.info(f"✅ Artifact registry container ensured: {self.container_name_artifact_registry}")
+            except Exception as e:
+                logging.warning(
+                    f"⚠️ Could not auto-create artifact registry container "
+                    f"(may already exist or insufficient permissions): {e}"
+                )
+            self.container_artifact_registry = self.database.get_container_client(self.container_name_artifact_registry)
 
-            
             logging.info(f"Cosmos DB client initialized: {self.database_name}/{self.container_name}")
+            logging.info(f"Artifact registry container: {self.container_name_artifact_registry}")
             logging.info(f"Client timeout configuration: total=300s, connection=60s, retries=3")
             
         except Exception as e:
@@ -1352,6 +1368,15 @@ class CosmosSessionService:
                     )
                     
                     logging.info(f"Session saved to Cosmos DB: {session_id} -> {thread_id}")
+                    
+                    # Log thread as artifact for retention tracking
+                    self.log_artifact(
+                        session_id=session_id,
+                        artifact_id=thread_id,
+                        artifact_type="thread",
+                        metadata={"source": "session_creation"}
+                    )
+                    
                     return  # Success, exit the retry loop
                     
                 except Exception as e:
@@ -1423,22 +1448,41 @@ class CosmosSessionService:
         except Exception as e:
             logging.error(f"Failed to add uploaded file ID to session {session_id}: {str(e)}")
 
-    def add_existing_files(self, session_id: str, file_ids: str) -> None:
-        '''Add existing file IDs to session tracking in Cosmos DB for deletion job'''
-        logging.info(f"Adding existing files function called in (cosmos service): {session_id} -> {file_ids}")
+    def log_artifact(self, session_id: str, artifact_id: str, artifact_type: str, metadata: Optional[Dict[str, str]] = None) -> None:
+        """Log a file or thread artifact to the artifact_registry container for retention tracking.
+        
+        Each artifact gets one flat document. The deletion job queries by partition key (date)
+        and updates deletion_status when the artifact is cleaned up.
+        
+        Args:
+            session_id: The conversation/session ID this artifact belongs to.
+            artifact_id: The Azure AI Foundry file_id or thread_id.
+            artifact_type: One of 'uploaded_file', 'generated_file', or 'thread'.
+            metadata: Optional dict with extra context (filename, file_type, source, etc.).
+        """
+        logging.info(f"Logging artifact to registry: session={session_id}, artifact={artifact_id}, type={artifact_type}")
         try:
-            existing_files_doc = {
-                "id": f"{session_id}_{int(time.time())}",
+            now = datetime.now(timezone.utc)
+            date_str = now.strftime("%Y-%m-%d")
+            
+            artifact_doc = {
+                "id": f"{artifact_id}_{int(now.timestamp() * 1000)}",
                 "session_id": session_id,
-                "file_ids": file_ids,
-                "added_at": datetime.now(timezone.utc).isoformat(),
-                "type": "existing_files"
+                "artifact_id": artifact_id,
+                "artifact_type": artifact_type,
+                "date": date_str,                          # Partition key
+                "created_at": now.isoformat(),
+                "metadata": metadata or {},
+                "deletion_status": "pending",              # pending | deleted | failed
+                "deleted_at": None,
+                "deletion_error": None
             }
-            # Save existing files document
-            self.container_files.upsert_item(existing_files_doc)
-            logging.info(f"Existing files added to Cosmos DB for session {session_id}: {file_ids}")
+            
+            self.container_artifact_registry.upsert_item(artifact_doc)
+            logging.info(f"✅ Artifact logged to registry: {artifact_type} {artifact_id} (date={date_str})")
         except Exception as e:
-            logging.error(f"Failed to add existing files to session {session_id}: {str(e)}")
+            logging.error(f"❌ Failed to log artifact {artifact_id} to registry: {str(e)}")
+            # Don't raise — artifact logging failure shouldn't break the main flow
 
 
     
