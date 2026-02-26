@@ -22,12 +22,8 @@ graph TB
         CSS["💾 CosmosSessionService<br/>Cosmos DB Operations"]
     end
 
-    subgraph "External Blob Reader"
-        BOPS["📥 BlobOperations_<br/>(BlobOperations.py)<br/>Read attachments from<br/>external blob storage"]
-    end
-
-    subgraph "Storage Layer"
-        BLOB["☁️ BlobStorageService<br/>(blob_service.py)<br/>Session artifact storage"]
+    subgraph "Unified Blob Client (BlobOperations.py)"
+        BOPS["📦 BlobOperations_<br/>Single storage account<br/>• Input container (read)<br/>• Output container (write)"]
     end
 
     subgraph "Telemetry Layer"
@@ -37,9 +33,8 @@ graph TB
     subgraph "Azure Services"
         AI["🤖 Azure AI Foundry<br/>Agents API<br/>(Threads/Messages/Runs)"]
         COSMOS["💾 Azure Cosmos DB<br/>Session Mapping<br/>+ File Tracking"]
-        BLOBAZ["☁️ Azure Blob Storage<br/>Session Files Container"]
+        BLOBAZ["☁️ Azure Blob Storage<br/>(Single Account)<br/>• Input container<br/>• Output container"]
         APPINS["📈 Application Insights<br/>Monitoring & Tracing"]
-        EXTBLOB["📦 External Blob Storage<br/>(User attachment source)"]
     end
 
     CLIENT -->|"POST JSON<br/>{conversationId, query, attachments}"| FA
@@ -47,14 +42,13 @@ graph TB
     FA --> MULTIPART
     MULTIPART --> CS
     MULTIPART -->|"Read attachment bytes"| BOPS
-    BOPS -->|"Download blob"| EXTBLOB
+    BOPS -->|"Read from input container<br/>Write to output container"| BLOBAZ
     CS --> FAS
     CS --> HSS
     HSS --> CSS
     CSS -->|"CRUD sessions & files"| COSMOS
     FAS -->|"Upload files,<br/>Create threads/messages,<br/>Run agent"| AI
-    FAS -->|"Store generated artifacts"| BLOB
-    BLOB -->|"Upload/Download"| BLOBAZ
+    FAS -->|"Store generated artifacts<br/>via blob_ops"| BOPS
     FA --> STREAM
     STREAM -->|"SSE text/event-stream"| CLIENT
     FA -.->|"Spans & Metrics"| TEL
@@ -73,13 +67,13 @@ sequenceDiagram
     autonumber
     participant C as 🌐 Client
     participant FA as ⚡ Function App
-    participant BO as 📥 BlobOperations_
+    participant BO as 📦 BlobOperations_
     participant CS as 🤖 ChatService
     participant FAS as 🧠 FoundryAgentService
     participant HSS as 🔗 HybridSessionService
     participant CSS as 💾 CosmosSessionService
     participant AI as 🤖 Azure AI Foundry
-    participant BS as ☁️ BlobStorageService
+    participant BLOB as ☁️ Azure Blob Storage
     participant DB as 💾 Cosmos DB
 
     Note over C,FA: 1. HTTP Request
@@ -95,6 +89,8 @@ sequenceDiagram
 
     loop For each attachment
         FA->>BO: BlobOperations_().read_blob(attachment_url)
+        BO->>BLOB: Download from INPUT container
+        BLOB-->>BO: blob bytes
         BO-->>FA: (path, bytes)
         FA->>FAS: upload_file_from_bytes(bytes, fileName)
         Note over FAS: Write to temp file
@@ -105,7 +101,7 @@ sequenceDiagram
     end
 
     Note over FA,CS: 3. Process Chat Request
-    FA->>CS: process_chat_request_with_files(session_id, query, file_ids)
+    FA->>CS: await process_chat_request_with_files(session_id, query, file_ids)
 
     Note over CS,CSS: 4. Session Management
     CS->>HSS: get_thread_id(session_id)
@@ -133,8 +129,8 @@ sequenceDiagram
     Note over AI: Agent executes code interpreter<br/>Generates text, images, files
     AI-->>FAS: run {status, run_id}
 
-    Note over CS,BS: 6. Response Extraction
-    CS->>FAS: get_latest_message(thread_id, run_id, session_id)
+    Note over CS,BO: 6. Response Extraction & Artifact Upload
+    CS->>FAS: await get_latest_message(thread_id, run_id, session_id)
     FAS->>AI: agents.messages.list(thread_id, limit=1)
     AI-->>FAS: message with content[]
 
@@ -146,16 +142,20 @@ sequenceDiagram
                 FAS->>AI: agents.files.get_content(file_id)
                 AI-->>FAS: file bytes
                 FAS->>FAS: _infer_ext_and_content_type(bytes)
-                FAS->>BS: upload_file(session_id, bytes, filename, subfolder)
-                BS-->>FAS: {blob_url, sas_url, blob_path}
+                FAS->>BO: await upload_file(session_id, bytes, filename, subfolder)
+                BO->>BLOB: Upload to OUTPUT container
+                BLOB-->>BO: success
+                BO-->>FAS: {blob_url, sas_url, blob_path}
                 FAS->>CSS: add_generated_file(session_id, file_id)
                 FAS->>CSS: add_existing_files(session_id, file_ids)
             end
         else type == "image_file"
             FAS->>AI: agents.files.get_content(file_id)
             AI-->>FAS: image bytes
-            FAS->>BS: upload_file(session_id, bytes, filename, subfolder="imgs")
-            BS-->>FAS: {blob_url, sas_url, blob_path}
+            FAS->>BO: await upload_file(session_id, bytes, filename, subfolder="imgs")
+            BO->>BLOB: Upload to OUTPUT container
+            BLOB-->>BO: success
+            BO-->>FAS: {blob_url, sas_url, blob_path}
             FAS->>CSS: add_generated_file(session_id, file_id, "image")
             FAS->>CSS: add_existing_files(session_id, file_id)
         end
@@ -197,9 +197,7 @@ classDiagram
         +AIProjectClient client
         +str model
         +str agent_id
-        +bool enable_blob_storage
-        +BlobStorageService blob_service
-        +bool disable_local_files
+        +BlobOperations_ blob_ops
         +HybridSessionService session_service
         -str _base_agent
         -str _current_session_id
@@ -214,7 +212,6 @@ classDiagram
         -_get_content_type_from_filename(filename) str
         -_detect_image_ext(data) Optional~str~
         -_infer_ext_and_content_type(data, default_ext, hint_text) Tuple
-        -_capture_run_artifacts(thread_id, run_id, session_id, images_dir, response_content)
     }
 
     class HybridSessionService {
@@ -241,42 +238,32 @@ classDiagram
         +log_interaction(session_id, thread_id, query, response, file_ids, execution_time) None
     }
 
-    class BlobStorageService {
-        +str account_url
-        +str container_name
-        +DefaultAzureCredential credential
-        +BlobServiceClient blob_service_client
-        +container_client
-        +upload_file(session_id, file_content, filename, content_type, metadata, subfolder) Dict
-        +generate_sas_url(blob_path, expiry_hours) str
-        +list_session_files(session_id, date) list
-        +get_blob_info(blob_path) Optional~Dict~
-        +get_subfolder_for_file_type(filename, file_source) str
-        -_ensure_container_exists()
-        -_generate_blob_path(session_id, filename, date, subfolder) str
-        -_get_content_type(filename) str
-    }
-
     class BlobOperations_ {
         +str container_name
+        +str output_container_name
         +int max_workers
-        +BlobServiceClient _client
-        +container
+        -BlobServiceClient _client
+        -str _account_name
+        -str _account_key
+        +ContainerClient container
+        -ContainerClient _output_container
+        -bool _output_container_exists
         +extract_blob_path(url, container_name) str
         +read_blob(blob_path) Tuple~str_bytes~
+        +upload_file(session_id, file_content, filename, content_type, metadata, subfolder) Dict
+        +generate_sas_url(blob_path, expiry_hours) str
+        +get_subfolder_for_file_type(filename, file_source) str
+        +list_session_files(session_id, date) List~Dict~
         +close()
-    }
-
-    class SessionService {
-        +str excel_file
-        +get_thread_id(session_id) Optional~str~
-        -_ensure_excel_file_exists()
+        -_ensure_output_container_exists() ContainerClient
+        -_generate_blob_path(session_id, filename, subfolder) str
+        -_get_content_type(filename) str
     }
 
     ChatService --> FoundryAgentService : foundry_service
     ChatService --> HybridSessionService : session_service
     HybridSessionService --> CosmosSessionService : cosmos_service
-    FoundryAgentService --> BlobStorageService : blob_service
+    FoundryAgentService --> BlobOperations_ : blob_ops
     FoundryAgentService --> HybridSessionService : session_service
 ```
 
@@ -312,7 +299,7 @@ flowchart TD
     CLASSIFY -->|".png/.jpg/.svg"| IMG_TYPE["type = 'image'<br/>subfolder = 'imgs'"]
     CLASSIFY -->|".csv/.xlsx/.json/.txt"| FILE_TYPE["type = 'file_output'<br/>subfolder = 'files-gen'"]
 
-    IMG_TYPE --> UPLOAD_BLOB["Upload to Blob Storage<br/>blob_service.upload_file()"]
+    IMG_TYPE --> UPLOAD_BLOB["await blob_ops.upload_file()<br/>→ OUTPUT container"]
     FILE_TYPE --> UPLOAD_BLOB
 
     UPLOAD_BLOB --> TRACK_COSMOS["Track in Cosmos DB<br/>add_generated_file()<br/>add_existing_files()"]
@@ -321,17 +308,10 @@ flowchart TD
 
     TEXT -->|"image_file"| IMG_FILE["Extract file_id from<br/>content.image_file.file_id"]
     IMG_FILE --> DOWNLOAD_IMG["Download image bytes<br/>agents.files.get_content(file_id)"]
-    DOWNLOAD_IMG --> SAVE_LOCAL{"Local storage<br/>enabled?"}
-    SAVE_LOCAL -->|"Yes"| WRITE_LOCAL["Write to images/ dir"]
-    SAVE_LOCAL -->|"No"| SKIP_LOCAL["Skip local write"]
-    WRITE_LOCAL --> BLOB_ENABLED{"Blob storage<br/>enabled?"}
-    SKIP_LOCAL --> BLOB_ENABLED
-    BLOB_ENABLED -->|"Yes"| UPLOAD_IMG["Upload to blob<br/>subfolder='imgs'"]
-    BLOB_ENABLED -->|"No"| LOCAL_ONLY["Add local path to response"]
+    DOWNLOAD_IMG --> UPLOAD_IMG["await blob_ops.upload_file()<br/>subfolder='imgs'<br/>→ OUTPUT container"]
     UPLOAD_IMG --> TRACK_IMG["Track in Cosmos DB"]
     TRACK_IMG --> APPEND_IMG["Append to response_content<br/>{type=image, blob_url, ...}"]
     APPEND_IMG --> NEXT
-    LOCAL_ONLY --> NEXT
 ```
 
 ---
@@ -379,41 +359,40 @@ flowchart TD
 
 ```mermaid
 graph TD
-    subgraph "Azure Blob Storage Container<br/>(data-analyst-session-files)"
-        subgraph "session-abc-123/"
-            subgraph "user-uploads/"
-                UF1["report.csv"]
-                UF2["data.xlsx"]
-            end
-            subgraph "imgs/"
-                IF1["file-id-001.png"]
-                IF2["file-id-002.jpg"]
-            end
-            subgraph "files-gen/"
-                GF1["file-id-003.csv"]
-                GF2["file-id-004.xlsx"]
-                GF3["file-id-005.json"]
-            end
+    subgraph "Azure Blob Storage Account<br/>(Single Account — Connection String Auth)"
+        subgraph "INPUT Container (O_CONTAINER_NAME)<br/>Read-only — Client Attachments"
+            IA1["client-folder/report.csv"]
+            IA2["client-folder/data.xlsx"]
         end
-        subgraph "session-def-456/"
-            subgraph "user-uploads/ "
-                UF3["sales.csv"]
+        subgraph "OUTPUT Container (OUTPUT_CONTAINER_NAME)<br/>Read/Write — Generated Artifacts"
+            subgraph "session-abc-123/"
+                subgraph "imgs/"
+                    IF1["file-id-001.png"]
+                    IF2["file-id-002.jpg"]
+                end
+                subgraph "files-gen/"
+                    GF1["file-id-003.csv"]
+                    GF2["file-id-004.xlsx"]
+                    GF3["file-id-005.json"]
+                end
             end
-            subgraph "imgs/ "
-                IF3["file-id-006.png"]
-            end
-            subgraph "files-gen/ "
-                GF4["file-id-007.txt"]
+            subgraph "session-def-456/"
+                subgraph "imgs/ "
+                    IF3["file-id-006.png"]
+                end
+                subgraph "files-gen/ "
+                    GF4["file-id-007.txt"]
+                end
             end
         end
     end
 
-    UPLOAD["upload_file()"] -->|"subfolder param"| ROUTE{"Subfolder?"}
-    ROUTE -->|"user-uploads"| UF1
+    READ["read_blob()"] -->|"Read from INPUT"| IA1
+    UPLOAD["upload_file()"] -->|"Write to OUTPUT<br/>subfolder param"| ROUTE{"Subfolder?"}
     ROUTE -->|"imgs"| IF1
     ROUTE -->|"files-gen"| GF1
 
-    SAS["generate_sas_url()"] -->|"User delegation key<br/>24h expiry, read-only"| SASURL["https://...blob.core.../path?sv=...&sig=..."]
+    SAS["generate_sas_url()"] -->|"Account-key SAS<br/>24h expiry, read-only"| SASURL["https://account.blob.core.../output-container/path?sv=...&sig=..."]
 ```
 
 ---
@@ -454,7 +433,6 @@ flowchart LR
     subgraph "Application Code"
         FA["function_app.py"]
         MOD["models.py"]
-        BS["blob_service.py"]
     end
 
     subgraph "telemetry.py"
@@ -513,21 +491,15 @@ flowchart TD
 
     LOOP --> READ["BlobOperations_.read_blob(url)"]
     READ --> EXTRACT{"URL starts with http?"}
-    EXTRACT -->|"Yes"| PARSE["extract_blob_path(url, container_name)<br/>Parse container path from URL"]
+    EXTRACT -->|"Yes"| PARSE["extract_blob_path(url, container_name)<br/>Parse blob path from URL<br/>(handles any file extension)"]
     EXTRACT -->|"No"| DIRECT["Use path directly"]
-    PARSE --> DL["Download blob via async client<br/>blob_client.download_blob()"]
+    PARSE --> DL["Download blob via async client<br/>from INPUT container"]
     DIRECT --> DL
     DL --> BYTES["Return (path, bytes)"]
 
     BYTES --> FOUNDRY_UP["FoundryAgentService.upload_file_from_bytes(bytes, fileName)"]
 
-    FOUNDRY_UP --> BLOB_CHECK{"STORE_USER_FILES_IN_BLOB<br/>== true?"}
-    BLOB_CHECK -->|"Yes"| USER_BLOB["Upload to blob storage<br/>subfolder='user-uploads'<br/>with metadata"]
-    BLOB_CHECK -->|"No"| SKIP_BLOB["Skip blob storage"]
-
-    USER_BLOB --> TEMP["Write to temp file"]
-    SKIP_BLOB --> TEMP
-
+    FOUNDRY_UP --> TEMP["Write to temp file"]
     TEMP --> AI_UPLOAD["upload_file(temp_path)<br/>→ agents.files.upload_and_poll()<br/>purpose=AGENTS"]
     AI_UPLOAD --> CLEANUP["Delete temp file"]
     CLEANUP --> RETURN_FID["Return file_id"]
@@ -600,13 +572,13 @@ erDiagram
 ```mermaid
 flowchart LR
     A["👤 User"] -->|"1. Send query + files"| B["⚡ Azure Function"]
-    B -->|"2. Download attachments"| C["📦 External Blob"]
+    B -->|"2. Read attachments<br/>from INPUT container"| C["☁️ Azure Blob Storage<br/>(Single Account)"]
     B -->|"3. Upload to AI"| D["🤖 Azure AI Foundry"]
     B -->|"4. Lookup/Save session"| E["💾 Cosmos DB"]
     D -->|"5. Agent runs code<br/>interpreter, generates<br/>text + charts + files"| D
     D -->|"6. Return results"| B
-    B -->|"7. Store artifacts"| F["☁️ Blob Storage"]
+    B -->|"7. Store artifacts<br/>in OUTPUT container"| C
     B -->|"8. Track files"| E
-    B -->|"9. Stream SSE response<br/>text + attachment URLs"| A
+    B -->|"9. Stream SSE response<br/>text + SAS attachment URLs"| A
     B -.->|"10. Telemetry"| G["📈 App Insights"]
 ```

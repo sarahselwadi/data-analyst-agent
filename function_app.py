@@ -259,7 +259,7 @@ async def _handle_multipart_request(req: Request, chat_service):
         
         # Process the chat request
         logging.info("🤖 Starting AI chat completion with files")
-        result = chat_service.process_chat_request_with_files(
+        result = await chat_service.process_chat_request_with_files(
             session_id=session_id,
             query=query,
             file_ids=file_ids
