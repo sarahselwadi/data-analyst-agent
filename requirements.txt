@@ -1,0 +1,18 @@
+azure-functions
+azure-ai-agents
+azure-ai-projects
+azure-identity
+azure-storage-blob
+azure-cosmos
+azure-core
+pandas
+requests
+python-dotenv
+openpyxl
+# OpenTelemetry and Application Insights dependencies
+azure-monitor-opentelemetry
+opentelemetry-sdk
+opentelemetry-api
+azurefunctions-extensions-http-fastapi
+fastapi
+aiohttp>=3.9.0

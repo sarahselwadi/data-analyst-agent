@@ -1,0 +1,133 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Local Azure Functions settings
+local.settings.json
+
+# Azure Functions artifacts
+bin
+obj
+appsettings.json
+local.settings.json
+
+# Node.js (Frontend)
+frontend/node_modules/
+frontend/.pnp
+frontend/.pnp.js
+frontend/coverage/
+frontend/build/
+frontend/.nyc_output
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+
+# IDE / Editor files
+
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Application specific
+images/
+threads.xlsx
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Test artifacts (keep these out)
+test_*.py
+test_*.json
+interactive_test.py
+*_test.py
+*_example.py
+manual_*.py
+create_*.py
+add_*.py
+streamlit_*.py
+cleanup_*.md
+
+# Documentation artifacts
+MIGRATION_*.md
+LOGGING_*.md
+TELEMETRY_*.md
+FIX_*.md
+DEPLOYMENT.md
+SETUP_GUIDE.md
+LOCAL_DEVELOPMENT.md
+QUICK_START.md
+PROJECT_STRUCTURE.md
+
+.python_packages
+
+# VS Code settings
+.vscode/

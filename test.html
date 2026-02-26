@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Analysis Chatbot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .chat-container {
+            width: 90%;
+            max-width: 800px;
+            height: 90vh;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .chat-header h1 {
+            font-size: 24px;
+            margin-bottom: 5px;
+        }
+
+        .chat-header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+
+        .file-section {
+            padding: 15px 20px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        .file-input-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .file-input {
+            flex: 1;
+            padding: 8px 12px;
+            border: 2px dashed #667eea;
+            border-radius: 8px;
+            background: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .file-input:hover {
+            border-color: #764ba2;
+            background: #f8f9ff;
+        }
+
+        .selected-files {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .file-tag {
+            background: #667eea;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .file-tag .remove {
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f8f9fa;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+        }
+
+        .message.user {
+            flex-direction: row-reverse;
+        }
+
+        .message-content {
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 18px;
+            word-wrap: break-word;
+        }
+
+        .message.user .message-content {
+            background: #667eea;
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.assistant .message-content {
+            background: white;
+            color: #333;
+            border: 1px solid #e9ecef;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        .message.user .message-avatar {
+            background: #764ba2;
+            color: white;
+        }
+
+        .message.assistant .message-avatar {
+            background: #28a745;
+            color: white;
+        }
+
+        .chat-input-container {
+            padding: 20px;
+            background: white;
+            border-top: 1px solid #e9ecef;
+        }
+
+        .chat-input-form {
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+        }
+
+        .chat-input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 2px solid #e9ecef;
+            border-radius: 25px;
+            resize: none;
+            font-family: inherit;
+            font-size: 14px;
+            max-height: 100px;
+            min-height: 44px;
+        }
+
+        .chat-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .send-button {
+            padding: 12px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+
+        .send-button:hover:not(:disabled) {
+            background: #764ba2;
+            transform: translateY(-1px);
+        }
+
+        .send-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #666;
+            font-style: italic;
+        }
+
+        .loading-dots {
+            display: inline-flex;
+            gap: 2px;
+        }
+
+        .loading-dots span {
+            width: 4px;
+            height: 4px;
+            background: #667eea;
+            border-radius: 50%;
+            animation: loading 1.4s infinite ease-in-out;
+        }
+
+        .loading-dots span:nth-child(1) { animation-delay: -0.32s; }
+        .loading-dots span:nth-child(2) { animation-delay: -0.16s; }
+
+        @keyframes loading {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+
+        .image-content {
+            max-width: 100%;
+            border-radius: 8px;
+            margin-top: 8px;
+        }
+
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 10px;
+            border-radius: 8px;
+            margin: 10px 0;
+            border: 1px solid #f5c6cb;
+        }
+
+        .clear-files-btn {
+            padding: 6px 12px;
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.3s ease;
+        }
+
+        .clear-files-btn:hover {
+            background: #c82333;
+        }
+
+        /* Markdown styling for assistant messages */
+        .message.assistant .message-content h1,
+        .message.assistant .message-content h2,
+        .message.assistant .message-content h3,
+        .message.assistant .message-content h4,
+        .message.assistant .message-content h5,
+        .message.assistant .message-content h6 {
+            margin: 0.5em 0;
+            color: #333;
+        }
+
+        .message.assistant .message-content p {
+            margin: 0.5em 0;
+            line-height: 1.5;
+        }
+
+        .message.assistant .message-content ul,
+        .message.assistant .message-content ol {
+            margin: 0.5em 0;
+            padding-left: 1.5em;
+        }
+
+        .message.assistant .message-content li {
+            margin: 0.25em 0;
+        }
+
+        .message.assistant .message-content code {
+            background: #f4f4f4;
+            padding: 0.2em 0.4em;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        .message.assistant .message-content pre {
+            background: #f4f4f4;
+            padding: 1em;
+            border-radius: 5px;
+            overflow-x: auto;
+            margin: 0.5em 0;
+        }
+
+        .message.assistant .message-content pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .message.assistant .message-content blockquote {
+            border-left: 4px solid #667eea;
+            margin: 0.5em 0;
+            padding-left: 1em;
+            color: #666;
+        }
+
+        .message.assistant .message-content table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 0.5em 0;
+        }
+
+        .message.assistant .message-content th,
+        .message.assistant .message-content td {
+            border: 1px solid #ddd;
+            padding: 0.5em;
+            text-align: left;
+        }
+
+        .message.assistant .message-content th {
+            background: #f8f9fa;
+            font-weight: bold;
+        }
+
+        .message.assistant .message-content strong {
+            font-weight: bold;
+        }
+
+        .message.assistant .message-content em {
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>📊 Data Analysis Agent</h1>
+            <p>Upload Excel/CSV files and ask questions about your data</p>
+        </div>
+
+        <div class="file-section">
+            <div class="file-input-container">
+                <input type="file" id="fileInput" class="file-input" multiple accept=".csv,.xlsx,.xls" 
+                       style="display: none;">
+                <label for="fileInput" class="file-input">
+                    📁 Choose files (CSV, Excel) - Click to add more files
+                </label>
+                <button type="button" class="clear-files-btn" onclick="chatbot.clearAllFiles()">Clear All</button>
+            </div>
+            <div class="selected-files" id="selectedFiles"></div>
+        </div>
+
+        <div class="chat-messages" id="chatMessages">
+            <div class="message assistant">
+                <div class="message-avatar">🤖</div>
+                <div class="message-content">
+                    Hello! I'm your document analysis assistant. Upload some Excel or CSV files and ask me questions about your data. I can analyze, visualize, and help you understand your data better. You can select multiple files at once or add them one by one.
+                </div>
+            </div>
+        </div>
+
+        <div class="chat-input-container">
+            <form class="chat-input-form" id="chatForm">
+                <textarea class="chat-input" id="messageInput" placeholder="Ask a question about your data..." 
+                         rows="1"></textarea>
+                <button type="submit" class="send-button" id="sendButton">Send</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        class DocumentChatbot {
+            constructor() {
+                this.conversationId = this.generateConversationId();
+                this.selectedFiles = [];
+                this.apiUrl ='https://data-analyst-bmd0a9b5b2b4gag0.swedencentral-01.azurewebsites.net/api/data-analyst'
+                // this.apiUrl = 'http://localhost:7071/api/data-analyst';
+                
+                this.initializeElements();
+                this.bindEvents();
+            }
+
+            generateConversationId() {
+                return 'conversation_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            }
+
+            initializeElements() {
+                this.fileInput = document.getElementById('fileInput');
+                this.selectedFilesContainer = document.getElementById('selectedFiles');
+                this.chatMessages = document.getElementById('chatMessages');
+                this.messageInput = document.getElementById('messageInput');
+                this.sendButton = document.getElementById('sendButton');
+                this.chatForm = document.getElementById('chatForm');
+            }
+
+            bindEvents() {
+                this.fileInput.addEventListener('change', (e) => this.handleFileSelection(e));
+                this.chatForm.addEventListener('submit', (e) => this.handleSubmit(e));
+                this.messageInput.addEventListener('input', () => this.autoResize());
+                this.messageInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        this.handleSubmit(e);
+                    }
+                });
+            }
+
+            handleFileSelection(event) {
+                const newFiles = Array.from(event.target.files);
+                
+                // Add new files to existing selection (avoid duplicates)
+                newFiles.forEach(newFile => {
+                    const isDuplicate = this.selectedFiles.some(existingFile => 
+                        existingFile.name === newFile.name && 
+                        existingFile.size === newFile.size &&
+                        existingFile.lastModified === newFile.lastModified
+                    );
+                    
+                    if (!isDuplicate) {
+                        this.selectedFiles.push(newFile);
+                    }
+                });
+                
+                this.updateSelectedFilesDisplay();
+                // Clear the input so the same files can be selected again if needed
+                this.fileInput.value = '';
+            }
+
+            updateSelectedFilesDisplay() {
+                this.selectedFilesContainer.innerHTML = '';
+                this.selectedFiles.forEach((file, index) => {
+                    const fileTag = document.createElement('div');
+                    fileTag.className = 'file-tag';
+                    fileTag.innerHTML = `
+                        ${file.name}
+                        <span class="remove" onclick="chatbot.removeFile(${index})">×</span>
+                    `;
+                    this.selectedFilesContainer.appendChild(fileTag);
+                });
+            }
+
+            removeFile(index) {
+                this.selectedFiles.splice(index, 1);
+                this.updateSelectedFilesDisplay();
+            }
+
+            clearAllFiles() {
+                this.selectedFiles = [];
+                this.updateSelectedFilesDisplay();
+                this.fileInput.value = '';
+            }
+
+            autoResize() {
+                this.messageInput.style.height = 'auto';
+                this.messageInput.style.height = Math.min(this.messageInput.scrollHeight, 100) + 'px';
+            }
+
+            async handleSubmit(event) {
+                event.preventDefault();
+                
+                const message = this.messageInput.value.trim();
+                if (!message) return;
+
+                // Add user message to chat
+                this.addMessage('user', message);
+                this.messageInput.value = '';
+                this.autoResize();
+
+                // Show loading
+                const loadingId = this.addLoadingMessage();
+
+                try {
+                    // Prepare form data
+                    const formData = new FormData();
+                    formData.append('conversationId', this.conversationId);
+                    formData.append('query', message);
+                    
+                    // Add selected files
+                    this.selectedFiles.forEach(file => {
+                        formData.append('files', file);
+                    });
+
+                    // Send request
+                    const response = await fetch(this.apiUrl, {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    const result = await response.json();
+
+                    // Remove loading message
+                    this.removeLoadingMessage(loadingId);
+
+                    if (result.status === 'completed') {
+                        console.log('Full result received:', result); // Debug log
+                        console.log('Response array:', result.response); // Debug log
+                        // Add assistant response
+                        this.addAssistantResponse(result.response);
+                    } else {
+                        this.addErrorMessage('An error occurred');
+                    }
+
+                } catch (error) {
+                    this.removeLoadingMessage(loadingId);
+                    this.addErrorMessage('Failed to connect to the server. Please make sure the Azure Function is running.');
+                    console.error('Error:', error);
+                }
+            }
+
+            addMessage(sender, content) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${sender}`;
+                
+                const avatar = sender === 'user' ? '👤' : '🤖';
+                
+                // Render markdown for assistant messages, escape HTML for user messages
+                const processedContent = sender === 'assistant' ? marked.parse(content) : this.escapeHtml(content);
+                
+                messageDiv.innerHTML = `
+                    <div class="message-avatar">${avatar}</div>
+                    <div class="message-content">${processedContent}</div>
+                `;
+                
+                this.chatMessages.appendChild(messageDiv);
+                this.scrollToBottom();
+            }
+
+           addAssistantResponse(responseArray) {
+                responseArray.forEach(item => {
+                    if (item.type === 'text') {
+                        this.addMessage('assistant', item.content);
+                    } else if (item.type === 'image') {
+                        this.addImageMessage(item);
+                    } else if (item.type === 'file_output') {
+                        this.addFileDownloadMessage(item);
+                    } else if (item.type === 'code_executed') {
+                        console.log('🔧 Code Executed by Assistant:\n', item.code);
+                    }
+                });
+            }
+
+            addImageMessage(imageItem) {
+                console.log('Image item received:', imageItem); // Debug log
+                
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'message assistant';
+                
+                let content = '';
+                if (imageItem.error) {
+                    content = `Error loading image: ${imageItem.error}`;
+                } else if (imageItem.filename) {
+                    // Display the locally saved image
+                    // const imageUrl = `http://localhost:7071/api/images/${imageItem.filename}`;
+                    
+                    const imageUrl = `https://data-analyst-bmd0a9b5b2b4gag0.swedencentral-01.azurewebsites.net/api/images/${imageItem.filename}?conversationId=${this.conversationId}`;
+
+
+                    content = `
+                        📊 Generated chart/visualization:
+                        <br><br>
+                        <img src="${imageUrl}" 
+                             class="image-content" 
+                             alt="Generated visualization"
+                             style="max-width: 100%; height: auto; border-radius: 8px; margin-top: 8px;"
+                             onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                        <div style="display: none; color: #666; font-style: italic;">
+                            Image could not be loaded. File ID: ${imageItem.file_id}
+                        </div>
+                    `;
+                } else {
+                    content = `📊 Generated chart/visualization (File ID: ${imageItem.file_id || 'undefined'})`;
+                }
+                
+                messageDiv.innerHTML = `
+                    <div class="message-avatar">🤖</div>
+                    <div class="message-content">${content}</div>
+                `;
+                
+                this.chatMessages.appendChild(messageDiv);
+                this.scrollToBottom();
+            }
+
+            addFileDownloadMessage(fileItem) {
+                console.log('File download item received:', fileItem); // Debug log
+                
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'message assistant';
+                
+                // Use blob URL directly (SAS disabled per user request)
+                const downloadUrl = fileItem.blob_url;
+                const fileName = fileItem.filename || 'download';
+                
+                let content = '';
+                if (fileItem.error || fileItem.blob_error) {
+                    content = `Error with file: ${fileItem.error || fileItem.blob_error}`;
+                } else if (downloadUrl) {
+                    content = `
+                        📄 Generated file: <strong>${fileName}</strong>
+                        <br><br>
+                        <a href="${downloadUrl}" target="_blank" download="${fileName}" 
+                           style="background: #28a745; color: white; padding: 10px 16px; 
+                                  border-radius: 6px; text-decoration: none; display: inline-block;
+                                  font-weight: bold; transition: all 0.3s ease;"
+                           onmouseover="this.style.background='#218838'"
+                           onmouseout="this.style.background='#28a745'">
+                            📥 Download ${fileName}
+                        </a>
+                        <br><small style="color: #666; margin-top: 8px; display: block;">
+                            Click to download the file to your computer${fileItem.sas_url ? ' (Secure link expires in 24 hours)' : ''}
+                        </small>
+                    `;
+                } else {
+                    content = `📄 Generated file: ${fileName} (File ID: ${fileItem.file_id || 'undefined'})`;
+                }
+                
+                messageDiv.innerHTML = `
+                    <div class="message-avatar">🤖</div>
+                    <div class="message-content">${content}</div>
+                `;
+                
+                this.chatMessages.appendChild(messageDiv);
+                this.scrollToBottom();
+            }
+
+            addLoadingMessage() {
+                const loadingId = 'loading_' + Date.now();
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'message assistant';
+                messageDiv.id = loadingId;
+                messageDiv.innerHTML = `
+                    <div class="message-avatar">🤖</div>
+                    <div class="message-content loading">
+                        Analyzing your data
+                        <div class="loading-dots">
+                            <span></span>
+                            <span></span>
+                            <span></span>
+                        </div>
+                    </div>
+                `;
+                
+                this.chatMessages.appendChild(messageDiv);
+                this.scrollToBottom();
+                return loadingId;
+            }
+
+            removeLoadingMessage(loadingId) {
+                const loadingElement = document.getElementById(loadingId);
+                if (loadingElement) {
+                    loadingElement.remove();
+                }
+            }
+
+            addErrorMessage(error) {
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'error-message';
+                errorDiv.textContent = `Error: ${error}`;
+                this.chatMessages.appendChild(errorDiv);
+                this.scrollToBottom();
+            }
+
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            scrollToBottom() {
+                this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
+            }
+        }
+
+        // Initialize chatbot
+        const chatbot = new DocumentChatbot();
+    </script>
+</body>
+</html>
