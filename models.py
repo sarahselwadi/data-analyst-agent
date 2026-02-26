@@ -27,7 +27,7 @@ except Exception:  # package might not be present at type-check time
         def _decorator(fn):
             return fn
         return _decorator
-from blob_service import BlobStorageService
+from BlobOperations import BlobOperations_
 
 # Load environment variables
 load_dotenv()
@@ -53,18 +53,9 @@ class FoundryAgentService:
         # except Exception as e:
         #     logging.error(f"Failed to delete file {str(e)}")
 
-        # Initialize blob storage service if enabled
-        self.enable_blob_storage = os.getenv("ENABLE_BLOB_STORAGE", "false").lower() == "true"
-        if self.enable_blob_storage:
-            self.blob_service = BlobStorageService()
-            logging.info("✅ Blob storage enabled for file persistence")
-        else:
-            self.blob_service = None
-            logging.info("📁 Using local storage for file persistence")
-        # Control local file writes (default false; set to true in Azure to avoid local disk usage)
-        self.disable_local_files = os.getenv("DISABLE_LOCAL_FILE_STORAGE", "false").lower() == "true"
-        if self.disable_local_files:
-            logging.info("🛡️ Local file writes are disabled; artifacts will not be written to the Function file system")
+        # Unified blob storage client (single storage account, two containers)
+        self.blob_ops = BlobOperations_()
+        logging.info("✅ Unified blob storage client initialized (BlobOperations_)")
 
     # --- NEW: Helper method to determine content type from filename ---
     def _get_content_type_from_filename(self, filename: str) -> str:
@@ -215,48 +206,15 @@ class FoundryAgentService:
     
     def upload_file_from_bytes(self, file_content: bytes, filename: str) -> str:
         logging.info(f"Upload file from bytes function called for filename: {filename}")
-        """Upload a file from bytes to Azure AI Foundry and return file ID"""
+        """Upload a file from bytes to Azure AI Foundry and return file ID.
+        
+        Writes bytes to a temp file, uploads to AI Foundry, cleans up, returns file_id.
+        User attachments already live in the input blob container — no need to re-upload them.
+        """
         with create_custom_span("foundry_upload_file_from_bytes", "ai_foundry"):
             try:
-                # NEW: Enhanced logging for file upload start
-                logging.info(f"📤 Starting file upload: {filename} ({len(file_content)} bytes)")
-                
-                # NEW: Store in user's blob storage first (if enabled)
-                store_in_blob = os.getenv("STORE_USER_FILES_IN_BLOB", "false").lower() == "true"
-                if store_in_blob and self.enable_blob_storage and self.blob_service:
-                    logging.info(f"🔧 User file blob storage enabled - storing {filename} in blob storage")
-                    
-                    # NEW: Store user uploaded file in blob storage with session-based organization
-                    # Note: session_id should be passed from the calling function, but we'll use a default for now
-                    session_id = getattr(self, '_current_session_id', 'default-session')
-                    content_type = self._get_content_type_from_filename(filename)
-                    
-                    upload_result = self.blob_service.upload_file(
-                        session_id=session_id,
-                        file_content=file_content,
-                        filename=filename,
-                        content_type=content_type,
-                        subfolder="user-uploads",  # NEW: Use user-uploads subfolder
-                        metadata={
-                            'source': 'user_upload',
-                            'original_filename': filename,
-                            'upload_timestamp': datetime.now().isoformat(),
-                            'file_size': str(len(file_content))
-                        }
-                    )
-                    
-                    if upload_result['success']:
-                        logging.info(f"📦 User file stored in blob: {upload_result['blob_path']}")
-                        logging.info(f"🔗 Blob URL: {upload_result['blob_url']}")
-                    else:
-                        logging.warning(f"⚠️ Failed to store user file in blob: {upload_result.get('error')}")
-                else:
-                    if store_in_blob:
-                        logging.info(f"⚠️ Blob storage for user files is enabled but blob service is not available")
-                    else:
-                        logging.info(f"ℹ️ User file blob storage disabled - skipping blob storage for {filename}")
+                logging.info(f"📤 Starting file upload to AI Foundry: {filename} ({len(file_content)} bytes)")
 
-                # EXISTING CODE: Original Azure AI Foundry upload (unchanged)
                 add_span_attributes(
                     filename=filename,
                     file_size=len(file_content),
@@ -449,8 +407,12 @@ Always save any charts or images you create to the current directory and provide
                 logging.error(f"❌ AI agent run failed | thread_id={thread_id} | error={str(e)}")
                 raise
     
-    def get_latest_message(self, thread_id: str, run_id: str, session_id: str = None) -> List[Dict[str, Any]]:
-        """Get the latest assistant message from the thread"""
+    async def get_latest_message(self, thread_id: str, run_id: str, session_id: str = None) -> List[Dict[str, Any]]:
+        """Get the latest assistant message from the thread.
+        
+        Downloads generated artifacts from AI Foundry and uploads them to the
+        unified output blob container via self.blob_ops.
+        """
         logging.info(f"Get latest message function called for thread_id: {thread_id}, run_id: {run_id}, session_id: {session_id}")
         try:
             messages = self.client.agents.messages.list(thread_id=thread_id, limit=1)
@@ -460,19 +422,8 @@ Always save any charts or images you create to the current directory and provide
             
             latest_message = messages_list[0]
             response_content = []
-            # Track already downloaded files using blob metadata (persistent across function calls)
-            # This replaces the stateless downloaded_files set with persistent blob metadata tracking
 
-            # Create images directory only if local writes are enabled
-            logging.info(f"checking local file storage setting")
-
-            images_dir = None if self.disable_local_files else "images"
-
-            if images_dir and not os.path.exists(images_dir):
-                os.makedirs(images_dir)
-            logging.info(f"images directoy created")
-
-            # Process latest message content first
+            # Process latest message content
             for content in latest_message.content:
                 logging.info(f"latest msg content type: {content.type}")
 
@@ -483,16 +434,13 @@ Always save any charts or images you create to the current directory and provide
                         "content": content.text.value
                     })
 
-                    # New: harvest file_path annotations embedded in the text part
+                    # Harvest file_path annotations embedded in the text part
                     try:
                         annotations = getattr(content.text, 'annotations', []) or []
                         if annotations:
-                            logging.info(f"Found {len(annotations)}  text annotations; checking for file_path artifacts")
-                            logging.info(f"Annotations: {annotations}")
-                            logging.info(f"Latest message file_path_annotations: {getattr(latest_message, 'file_path_annotations', None)}")
+                            logging.info(f"Found {len(annotations)} text annotations; checking for file_path artifacts")
                         for ann in annotations:
                             ann_type = getattr(ann, 'type', None) or getattr(ann, 'annotation_type', None)
-                            # Most SDKs expose file path annotations as type 'file_path' with a .file_path object containing .file_id & .path
                             if (ann_type == 'file_path') or hasattr(ann, 'file_path'):
                                 file_path_obj = getattr(ann, 'file_path', None)
                                 file_id = None
@@ -501,33 +449,27 @@ Always save any charts or images you create to the current directory and provide
                                     file_id = getattr(file_path_obj, 'file_id', None)
                                     sandbox_path = getattr(file_path_obj, 'path', None)
 
-                                # Some SDKs flatten the properties
                                 if not file_id:
                                     file_id = getattr(ann, 'file_id', None)
                                 if not sandbox_path:
                                     sandbox_path = getattr(ann, 'path', None)
                                 logging.info(f"Processing text annotation for file in sandbox_path: {sandbox_path}")
-                                
 
                                 if not sandbox_path:
                                     if hasattr(latest_message, 'file_path_annotations') and latest_message.file_path_annotations:
                                         for file_annotation in latest_message.file_path_annotations:
-                                        
                                             file_id = file_annotation.file_path.file_id
-      
-                                                                    
-                                            # Determine file extension based on annotation text
                                             annotation_text = file_annotation.text if hasattr(file_annotation, 'text') else ''
-                                            logging.info(f"Downloading file from annotation: {file_id},path : {annotation_text}")
-
+                                            logging.info(f"Downloading file from annotation: {file_id}, path: {annotation_text}")
                                             sandbox_path = annotation_text
 
-
+                                # Determine extension from sandbox path
+                                ext = '.png'  # default
                                 if isinstance(sandbox_path, str):
                                     lower = sandbox_path.lower()
                                     if lower.endswith('.png'):
                                         ext = '.png'
-                                    if lower.endswith('.jpg') or lower.endswith('.jpeg'):
+                                    elif lower.endswith('.jpg') or lower.endswith('.jpeg'):
                                         ext = '.jpg'
                                     elif lower.endswith('.svg'):
                                         ext = '.svg'
@@ -539,26 +481,10 @@ Always save any charts or images you create to the current directory and provide
                                         ext = '.json'
                                     elif lower.endswith('.txt'):
                                         ext = '.txt'
+
                                 if file_id:
-                                    # Check if file was already returned using blob metadata (persistent tracking)
-                                    blob_path = None
-                                    if self.enable_blob_storage and self.blob_service and session_id:
-                                        # Generate potential blob path to check return status
-                                        subfolder = self.blob_service.get_subfolder_for_file_type(f"{file_id}{ext}", 'files-gen')
-                                        blob_path = f"{session_id}/{subfolder}/{file_id}{ext}"
-                                        logging.info(f"Generated blob path for annotation file check: {blob_path}, sub")
-                                        # Skip if already returned to user
-                                        # if self.blob_service.is_file_returned(blob_path):
-                                        #     logging.info(f"📋 File {file_id} already returned to user, skipping")
-                                        #     continue
-                                    
-                                    # Process file if not already returned
                                     try:
-                                        # Determine extension from sandbox path if available
-
-
                                         output_filename = f"{file_id}{ext}"
-                                        output_path = os.path.join(images_dir, output_filename) if images_dir else None
 
                                         # Download file bytes via file_id
                                         file_stream = self.client.agents.files.get_content(file_id=file_id)
@@ -566,19 +492,11 @@ Always save any charts or images you create to the current directory and provide
                                         for chunk in file_stream:
                                             content_bytes += chunk
 
-                                        # Save locally first (if enabled)
-                                        if output_path:
-                                            try:
-                                                with open(output_path, 'wb') as f:
-                                                    f.write(content_bytes)
-                                            except Exception as write_err:
-                                                logging.warning(f"Skipping local write for annotated file {output_filename}: {write_err}")
-
                                         logging.info(f"Annotated file downloaded: {file_id} (ext: {ext}, size: {len(content_bytes)} bytes)")
 
-                                        # If extension is ambiguous/defaulted to .png but content isn't an image, infer a better type
+                                        # If extension is ambiguous/defaulted to .png, infer a better type
                                         if ext == '.png':
-                                            inferred_ext, inferred_ct,sub_folder = self._infer_ext_and_content_type(
+                                            inferred_ext, inferred_ct, sub_folder = self._infer_ext_and_content_type(
                                                 content_bytes,
                                                 default_ext=ext,
                                                 hint_text=(content.text.value if hasattr(content, 'text') else None)
@@ -586,131 +504,56 @@ Always save any charts or images you create to the current directory and provide
                                             if inferred_ext != ext:
                                                 output_filename = f"{file_id}{inferred_ext}"
                                                 ext = inferred_ext
-                                            if not ext:
-                                                lower = output_filename.lower()
-                                                if lower.endswith('.png'):
-                                                    ext = '.png'
-                                                if lower.endswith('.jpg') or lower.endswith('.jpeg'):
-                                                    ext = '.jpg'
-                                                elif lower.endswith('.svg'):
-                                                    ext = '.svg'
-                                                elif lower.endswith('.csv'):
-                                                    ext = '.csv'
-                                                elif lower.endswith('.xlsx'):
-                                                    ext = '.xlsx'
-                                                elif lower.endswith('.json'):
-                                                    ext = '.json'
-                                                elif lower.endswith('.txt'):
-                                                    ext = '.txt'
 
-                                        # Upload to blob if enabled
-                                        if self.enable_blob_storage and self.blob_service:
-                                            # Best-effort content type
-                                            content_type = 'application/octet-stream'
-                                            if ext in ['.png', '.jpg', '.jpeg', '.svg']:
-                                                sub_folder ='imgs'
-                                                content_type = 'image/png' if ext == '.png' else ('image/svg+xml' if ext == '.svg' else 'image/jpeg')
-                                            elif ext == '.csv':
-                                                sub_folder ='files-gen"'
-                                                content_type = 'text/csv'
-                                            elif ext == '.xlsx':
-                                                sub_folder ='files-gen'
-                                                content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                                            elif ext == '.json':
-                                                sub_folder ='files-gen'
-                                                content_type = 'application/json'
-                                            elif ext == '.txt':
-                                                sub_folder ='files-gen'
-                                                content_type = 'text/plain'
+                                        # Determine subfolder and content type
+                                        sub_folder = self.blob_ops.get_subfolder_for_file_type(output_filename)
+                                        content_type = self.blob_ops._get_content_type(output_filename)
 
-                                            upload_result = self.blob_service.upload_file(
-                                                session_id=session_id or "unknown-session",
-                                                file_content=content_bytes,
-                                                filename=output_filename,
-                                                content_type=content_type,
-                                                metadata={
-                                                    'file_id': file_id,
-                                                    'source': 'text_annotation',
-                                                    'agent_run_id': run_id
-                                                },subfolder=sub_folder
-                                            )
+                                        # Upload to output blob container
+                                        upload_result = await self.blob_ops.upload_file(
+                                            session_id=session_id or "unknown-session",
+                                            file_content=content_bytes,
+                                            filename=output_filename,
+                                            content_type=content_type,
+                                            metadata={
+                                                'file_id': file_id,
+                                                'source': 'text_annotation',
+                                                'agent_run_id': run_id
+                                            },
+                                            subfolder=sub_folder
+                                        )
 
-                                            if upload_result['success']:
-                                                logging.info(f"Annotated file uploaded to blob: {upload_result['blob_path']}")
-                                                # Classify type based on extension
-                                                item_type = 'image' if ext in ['.png', '.jpg', '.jpeg', '.svg'] else 'file_output'
-                                                response_content.append({
-                                                    "type": item_type,
-                                                    "file_id": file_id,
-                                                    "blob_url": upload_result['blob_url'],
-                                                    "blob_path": upload_result['blob_path'],
-                                                    **({"local_path": output_path} if output_path else {}),
-                                                    "filename": output_filename,
-                                                    "session_id": session_id
-                                                })
-                                                # Track generated file if session service is available
-                                                if hasattr(self, 'session_service') and self.session_service and session_id:
-                                                    try:
-                                                        logging.info(f"Tracking generated file {file_id} in Cosmos DB")
-                                                        file_type = 'image' if ext in ['.png', '.jpg', '.jpeg', '.svg'] else 'file_output'
-                                                        self.session_service.cosmos_service.add_generated_file(
-                                                            session_id, file_id, file_type, output_filename)
-                                                        
-                                                        logging.info(f"📝 Tracked generated file ID in Cosmos DB: {file_id}")
-
-                                                        self.session_service.cosmos_service.add_existing_files(
-                                                            session_id=session_id,file_ids=file_id)
-                                                        
-                                                        logging.info(f"📝 Tracked existing file ID in Cosmos DB for session: {session_id}")
-                                                                     
-        
-                                                    except Exception as track_err:
-                                                        logging.error(f"Failed to track generated file {file_id} in Cosmos DB: {str(track_err)}")
-
-                                                #track in cosmos DB
-
-                                                # logging.info(f"Annotated file : {file_id} ready for tracking in CosmosDB")
-                                                # .session_service.cosmos_service.add_generated_file(
-                                                #     self, session_id: str, file_id: str, file_type: str = None, filename: str = None)
-
-
-
-                                                # self.blob_service.mark_file_as_returned(upload_result['blob_path'])
-
-
-
-
-
-                                            else:
-                                                logging.error(f"Failed to upload annotated file to blob: {upload_result.get('error', 'Unknown error')}")
-                                                item_type = 'image' if ext in ['.png', '.jpg', '.jpeg', '.svg'] else 'file_output'
-                                                response_content.append({
-                                                    "type": item_type,
-                                                    "file_id": file_id,
-                                                    **({"local_path": output_path} if output_path else {}),
-                                                    "filename": output_filename,
-                                                    "blob_error": upload_result.get('error', 'Unknown error')
-                                                })
-                                        else:
-                                            # Local only
+                                        if upload_result['success']:
+                                            logging.info(f"Annotated file uploaded to blob: {upload_result['blob_path']}")
                                             item_type = 'image' if ext in ['.png', '.jpg', '.jpeg', '.svg'] else 'file_output'
-                                            if output_path:
-                                                response_content.append({
-                                                    "type": item_type,
-                                                    "file_id": file_id,
-                                                    "local_path": output_path,
-                                                    "filename": output_filename,
-                                                    "session_id": session_id
-                                                })
-
-                                            else:
-                                                response_content.append({
-                                                    "type": item_type,
-                                                    "file_id": file_id,
-                                                    "filename": output_filename,
-                                                    "session_id": session_id,
-                                                    "note": "local storage disabled"
-                                                })
+                                            response_content.append({
+                                                "type": item_type,
+                                                "file_id": file_id,
+                                                "blob_url": upload_result['blob_url'],
+                                                "blob_path": upload_result['blob_path'],
+                                                "filename": output_filename,
+                                                "session_id": session_id
+                                            })
+                                            # Track generated file in Cosmos DB
+                                            if hasattr(self, 'session_service') and self.session_service and session_id:
+                                                try:
+                                                    file_type = 'image' if ext in ['.png', '.jpg', '.jpeg', '.svg'] else 'file_output'
+                                                    self.session_service.cosmos_service.add_generated_file(
+                                                        session_id, file_id, file_type, output_filename)
+                                                    logging.info(f"📝 Tracked generated file ID in Cosmos DB: {file_id}")
+                                                    self.session_service.cosmos_service.add_existing_files(
+                                                        session_id=session_id, file_ids=file_id)
+                                                except Exception as track_err:
+                                                    logging.error(f"Failed to track generated file {file_id} in Cosmos DB: {str(track_err)}")
+                                        else:
+                                            logging.error(f"Failed to upload annotated file to blob: {upload_result.get('error', 'Unknown error')}")
+                                            item_type = 'image' if ext in ['.png', '.jpg', '.jpeg', '.svg'] else 'file_output'
+                                            response_content.append({
+                                                "type": item_type,
+                                                "file_id": file_id,
+                                                "filename": output_filename,
+                                                "blob_error": upload_result.get('error', 'Unknown error')
+                                            })
                                     except Exception as ann_err:
                                         logging.error(f"Failed to fetch annotated file {file_id}: {str(ann_err)}")
                     except Exception as e:
@@ -718,131 +561,68 @@ Always save any charts or images you create to the current directory and provide
 
                 elif content.type == 'image_file':
                     file_id = content.image_file.file_id
-                    # Check if file was already returned using blob metadata (persistent tracking)
-                    blob_path = None
-                    should_process = True
-                    
-                    if self.enable_blob_storage and self.blob_service and session_id:
-                        # Generate potential blob path to check return status
-                        subfolder = self.blob_service.get_subfolder_for_file_type(f"{file_id}.png", 'imgs')
-                        blob_path = f"{session_id}/{subfolder}/{file_id}.png"
-                        logging.info(f"Generated blob path for annotation file check: {blob_path}, subfolder: {subfolder}")
+                    try:
+                        logging.info(f"Processing image file: {file_id}")
+                        image_filename = f"{file_id}.png"
 
-                        
-                        # Skip if already returned to user
-                        # if self.blob_service.is_file_returned(blob_path):
-                        #     logging.info(f"📋 Image file {file_id} already returned to user, skipping")
-                        #     should_process = False
-                    
-                    if should_process:
-                        logging.info("Should Process is True for file")
-                        try:
-                            logging.info(f"Processing image file: {file_id}")
-                            
-                            # Use a simplified filename
-                            image_filename = f"{file_id}.png"
-                            
-                            # Get file content from Azure AI Foundry
-                            file_content_stream = self.client.agents.files.get_content(file_id=file_id)
-                            
-                            # Collect content into bytes
-                            file_content = b""
-                            for chunk in file_content_stream:
-                                file_content += chunk
-                            
-                            # Save locally (if enabled)
-                            image_path = None
-                            if images_dir:
-                                try:
-                                    image_path = os.path.join(images_dir, image_filename)
-                                    with open(image_path, 'wb') as f:
-                                        f.write(file_content)
-                                except Exception as write_err:
-                                    logging.warning(f"Skipping local write for image {image_filename}: {write_err}")
-                            
-                            # Upload to blob storage if enabled
-                            if self.enable_blob_storage and self.blob_service:
-                                upload_result = self.blob_service.upload_file(
-                                    session_id=session_id or "unknown-session",
-                                    file_content=file_content,
-                                    filename=image_filename,
-                                    content_type="image/png",
-                                    metadata={
-                                        'file_id': file_id,
-                                        'source': 'ai_generated_image',
-                                        'agent_run_id': run_id
-                                    },subfolder='imgs'
-                                )
-                                
-                                # # Mark file as returned using blob metadata (persistent tracking)
-                                # if self.enable_blob_storage and self.blob_service and session_id and upload_result['success']:
-                                #     self.blob_service.mark_file_as_returned(upload_result['blob_path'])
-                                
-                                # NEW: Track generated file ID in Cosmos DB
-                                # Note: This will be called from ChatService which has access to session_service
-                                logging.info(f"📝 Generated image file ready for tracking: {file_id}")
-                                
-                                if upload_result['success']:
-                                    logging.info(f"Image uploaded to blob storage: {upload_result['blob_path']}")
-                                    
-                                    response_content.append({
-                                        "type": "image",
-                                        "file_id": file_id,
-                                        "blob_url": upload_result['blob_url'],
-                                        "blob_path": upload_result['blob_path'],
-                                        **({"local_path": image_path} if image_path else {}),
-                                        "filename": image_filename,
-                                        "session_id": session_id
-                                    })
+                        # Get file content from Azure AI Foundry
+                        file_content_stream = self.client.agents.files.get_content(file_id=file_id)
+                        file_content = b""
+                        for chunk in file_content_stream:
+                            file_content += chunk
 
-                                    self.session_service.cosmos_service.add_generated_file(
-                                        session_id, file_id, "image", image_filename)
-                                    
-                                    logging.info(f"📝 Tracked generated file ID in Cosmos DB: {file_id}")
-                                    
-                                    self.session_service.cosmos_service.add_existing_files(
-                                        session_id=session_id,file_ids=file_id)
-                                    
-                                    logging.info(f"📝 Tracked existing file ID in Cosmos DB for session: {session_id}")
+                        # Upload to output blob container
+                        upload_result = await self.blob_ops.upload_file(
+                            session_id=session_id or "unknown-session",
+                            file_content=file_content,
+                            filename=image_filename,
+                            content_type="image/png",
+                            metadata={
+                                'file_id': file_id,
+                                'source': 'ai_generated_image',
+                                'agent_run_id': run_id
+                            },
+                            subfolder='imgs'
+                        )
 
-                                else:
-                                    logging.error(f"Failed to upload image to blob storage: {upload_result.get('error', 'Unknown error')}")
-                                    # Fallback to local storage only
-                                    response_content.append({
-                                        "type": "image",
-                                        "file_id": file_id,
-                                        **({"local_path": image_path} if image_path else {}),
-                                        "filename": image_filename,
-                                        "blob_error": upload_result.get('error', 'Unknown error')
-                                    })
-                            else:
-                                # Local storage only
-                                if image_path:
-                                    logging.info(f"Image saved locally: {image_path}")
-                                    response_content.append({
-                                        "type": "image",
-                                        "file_id": file_id,
-                                        "local_path": image_path,
-                                        "filename": image_filename,
-                                        "session_id": session_id
-                                    })
-                                else:
-                                    logging.info("Local storage disabled and blob disabled; returning in-memory artifact reference only")
-                                    response_content.append({
-                                        "type": "image",
-                                        "file_id": file_id,
-                                        "filename": image_filename,
-                                        "session_id": session_id,
-                                        "note": "local storage disabled"
-                                    })
-                            
-                        except Exception as e:
-                            logging.error(f"Failed to process image file {file_id}: {str(e)}")
+                        logging.info(f"📝 Generated image file ready for tracking: {file_id}")
+
+                        if upload_result['success']:
+                            logging.info(f"Image uploaded to blob storage: {upload_result['blob_path']}")
                             response_content.append({
                                 "type": "image",
                                 "file_id": file_id,
-                                "error": str(e)
+                                "blob_url": upload_result['blob_url'],
+                                "blob_path": upload_result['blob_path'],
+                                "filename": image_filename,
+                                "session_id": session_id
                             })
+                            # Track in Cosmos DB
+                            if hasattr(self, 'session_service') and self.session_service and session_id:
+                                try:
+                                    self.session_service.cosmos_service.add_generated_file(
+                                        session_id, file_id, "image", image_filename)
+                                    logging.info(f"📝 Tracked generated file ID in Cosmos DB: {file_id}")
+                                    self.session_service.cosmos_service.add_existing_files(
+                                        session_id=session_id, file_ids=file_id)
+                                except Exception as track_err:
+                                    logging.error(f"Failed to track image file {file_id} in Cosmos DB: {str(track_err)}")
+                        else:
+                            logging.error(f"Failed to upload image to blob storage: {upload_result.get('error', 'Unknown error')}")
+                            response_content.append({
+                                "type": "image",
+                                "file_id": file_id,
+                                "filename": image_filename,
+                                "blob_error": upload_result.get('error', 'Unknown error')
+                            })
+
+                    except Exception as e:
+                        logging.error(f"Failed to process image file {file_id}: {str(e)}")
+                        response_content.append({
+                            "type": "image",
+                            "file_id": file_id,
+                            "error": str(e)
+                        })
             
             # Process all messages for any additional files (annotations)
         #     try:
@@ -1904,7 +1684,7 @@ class ChatService:
 
         return thread_id
   
-    def process_chat_request_with_files(self, session_id: str, query: str, file_ids: List[str] = None) -> Dict[str, Any]:
+    async def process_chat_request_with_files(self, session_id: str, query: str, file_ids: List[str] = None) -> Dict[str, Any]:
         """Process a complete chat request with already uploaded file IDs"""
         with create_correlation_context(session_id=session_id) as correlation:
             start_time = time.time()
@@ -1939,7 +1719,7 @@ class ChatService:
                 if run_result["status"] == "completed":
                     # Get response
                     correlation.log_info("📨 Retrieving AI response")
-                    response_content = self.foundry_service.get_latest_message(thread_id, run_result['run_id'], session_id)
+                    response_content = await self.foundry_service.get_latest_message(thread_id, run_result['run_id'], session_id)
                     execution_time = time.time() - start_time
                     
                     correlation.log_info("✅ Chat request with files completed successfully",
