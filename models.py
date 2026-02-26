@@ -366,7 +366,7 @@ Always save any charts or images you create to the current directory and provide
                 raise
 
     @_agents_trace_function()
-    def run_thread(self, thread_id: str, agent_id: str) -> Dict[str, Any]:
+    def run_thread(self, thread_id: str, agent_id: str, session_id: str = None) -> Dict[str, Any]:
         """Run the thread and wait for completion with correlation tracking"""
         with create_custom_span("foundry_run_thread", "ai_foundry"):
             try:
@@ -390,12 +390,12 @@ Always save any charts or images you create to the current directory and provide
                     run_id=run.id,
                     run_status=run.status
                 )
-                
-
-
-
 
                 logging.info(f"✅ AI agent run completed | thread_id={thread_id} | run_id={run.id} | status={run.status}")
+
+                # Capture Code Interpreter executions to Cosmos DB
+                if session_id and run.status == "completed":
+                    self.capture_code_interpreter_runs(thread_id, run.id, session_id)
                 
                 return {
                     "status": run.status,
@@ -791,6 +791,105 @@ Always save any charts or images you create to the current directory and provide
             logging.error(f"Failed to get latest message: {str(e)}")
             raise
 
+    def capture_code_interpreter_runs(self, thread_id: str, run_id: str, session_id: str) -> None:
+        """List all run steps for a completed run, find Code Interpreter tool calls,
+        extract input code and outputs, and log each to Cosmos DB.
+
+        This method is best-effort: failures are logged but never re-raised so the
+        main agent flow is never interrupted.
+
+        Args:
+            thread_id: Azure AI Foundry thread ID.
+            run_id: Azure AI Foundry run ID (just completed).
+            session_id: Conversation/session ID for Cosmos partition key.
+        """
+        with create_custom_span("capture_code_interpreter_runs", "ai_foundry"):
+            try:
+                add_span_attributes(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    session_id=session_id,
+                    operation="capture_code_interpreter_runs"
+                )
+
+                logging.info(f"🔍 Capturing code interpreter runs | thread_id={thread_id} | run_id={run_id}")
+
+                # List all run steps
+                steps_iter = self.client.agents.run_steps.list(thread_id=thread_id, run_id=run_id)
+                steps_list = list(steps_iter)
+                logging.info(f"Retrieved {len(steps_list)} run steps for code capture")
+
+                captured_count = 0
+
+                for step in steps_list:
+                    step_id = getattr(step, 'id', None) or "unknown_step"
+                    step_status = getattr(step, 'status', 'unknown')
+                    step_details = getattr(step, 'step_details', None)
+                    if step_details is None:
+                        continue
+
+                    # Get tool_calls from step_details
+                    tool_calls = getattr(step_details, 'tool_calls', None)
+                    if not tool_calls:
+                        continue
+
+                    for call_index, tool_call in enumerate(tool_calls):
+                        # Check if this is a code_interpreter tool call
+                        call_type = getattr(tool_call, 'type', None)
+                        if call_type != "code_interpreter":
+                            continue
+
+                        # Extract code_interpreter details
+                        ci = getattr(tool_call, 'code_interpreter', None)
+                        if ci is None:
+                            continue
+
+                        # Extract input code
+                        code_input = getattr(ci, 'input', None) or ""
+
+                        # Extract outputs
+                        raw_outputs = getattr(ci, 'outputs', None) or []
+                        outputs = []
+                        for output in raw_outputs:
+                            output_type = getattr(output, 'type', None)
+                            if output_type == "logs":
+                                logs_text = getattr(output, 'logs', None) or ""
+                                outputs.append({"type": "logs", "logs": logs_text})
+                            elif output_type == "image":
+                                image_obj = getattr(output, 'image', None)
+                                file_id = getattr(image_obj, 'file_id', None) if image_obj else None
+                                if file_id:
+                                    outputs.append({"type": "image", "file_id": file_id})
+                                else:
+                                    outputs.append({"type": "image", "file_id": None})
+                            else:
+                                # Unknown output type — store what we can
+                                outputs.append({"type": str(output_type), "raw": str(output)})
+
+                        # Log to Cosmos DB via session_service
+                        if hasattr(self, 'session_service') and self.session_service and self.session_service.cosmos_service:
+                            self.session_service.cosmos_service.log_code_execution(
+                                session_id=session_id,
+                                thread_id=thread_id,
+                                run_id=run_id,
+                                step_id=step_id,
+                                call_index=call_index,
+                                code_input=code_input,
+                                outputs=outputs,
+                                status=step_status
+                            )
+                            captured_count += 1
+                        else:
+                            logging.warning("⚠️ session_service or cosmos_service not available for code execution logging")
+
+                add_span_attributes(captured_count=captured_count, total_steps=len(steps_list))
+                logging.info(f"📊 Captured {captured_count} code interpreter executions from {len(steps_list)} run steps")
+
+            except Exception as e:
+                record_exception(e, "capture_code_interpreter_runs_error")
+                logging.error(f"❌ Failed to capture code interpreter runs | thread_id={thread_id} | run_id={run_id} | error={str(e)}")
+                # Don't raise — capture failure shouldn't break the main flow
+
     def _capture_run_artifacts(self, thread_id: str, run_id: str, session_id: Optional[str], images_dir: str,
                                 response_content: List[Dict[str, Any]]):
         logging.info(f"Capturing run artifacts from steps for thread_id: {thread_id}, run_id: {run_id}, session_id: {session_id}")
@@ -1119,8 +1218,24 @@ class CosmosSessionService:
                 )
             self.container_artifact_registry = self.database.get_container_client(self.container_name_artifact_registry)
 
+            # Code executions container (partition key: /session_id) — auto-create if missing
+            self.container_name_code_executions = os.getenv("COSMOS_CONTAINER_NAME_CODE", "code_executions")
+            try:
+                self.database.create_container_if_not_exists(
+                    id=self.container_name_code_executions,
+                    partition_key=PartitionKey(path="/session_id")
+                )
+                logging.info(f"✅ Code executions container ensured: {self.container_name_code_executions}")
+            except Exception as e:
+                logging.warning(
+                    f"⚠️ Could not auto-create code executions container "
+                    f"(may already exist or insufficient permissions): {e}"
+                )
+            self.container_code_executions = self.database.get_container_client(self.container_name_code_executions)
+
             logging.info(f"Cosmos DB client initialized: {self.database_name}/{self.container_name}")
             logging.info(f"Artifact registry container: {self.container_name_artifact_registry}")
+            logging.info(f"Code executions container: {self.container_name_code_executions}")
             logging.info(f"Client timeout configuration: total=300s, connection=60s, retries=3")
             
         except Exception as e:
@@ -1448,6 +1563,50 @@ class CosmosSessionService:
         except Exception as e:
             logging.error(f"Failed to add uploaded file ID to session {session_id}: {str(e)}")
 
+    def log_code_execution(self, session_id: str, thread_id: str, run_id: str, step_id: str,
+                           call_index: int, code_input: str, outputs: List[Dict[str, Any]],
+                           status: str = "completed") -> None:
+        """Write a single code execution document to the code_executions Cosmos container.
+
+        Each call logs one Code Interpreter tool call invocation. Failures are caught
+        and logged without re-raising so code execution logging never breaks the main flow.
+
+        Args:
+            session_id: Conversation/session ID (partition key).
+            thread_id: Azure AI Foundry thread ID.
+            run_id: Azure AI Foundry run ID.
+            step_id: Run step ID within the run.
+            call_index: 0-based index of the tool call within the step.
+            code_input: The Python code the model sent to Code Interpreter.
+            outputs: List of output dicts, each with 'type' and either 'logs' or 'file_id'.
+            status: Step status (e.g. 'completed', 'failed').
+        """
+        logging.info(f"Logging code execution: session={session_id}, run={run_id}, step={step_id}, call_index={call_index}")
+        try:
+            now = datetime.now(timezone.utc)
+            doc_id = f"{run_id}_{step_id}_{call_index}_{int(now.timestamp() * 1000)}"
+            date_str = now.strftime("%Y-%m-%d")
+
+            code_exec_doc = {
+                "id": doc_id,
+                "session_id": session_id,
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "step_id": step_id,
+                "call_index": call_index,
+                "code_input": code_input,
+                "outputs": outputs,
+                "status": status,
+                "created_at": now.isoformat(),
+                "date": date_str
+            }
+
+            self.container_code_executions.upsert_item(code_exec_doc)
+            logging.info(f"✅ Code execution logged: {doc_id} (session={session_id})")
+        except Exception as e:
+            logging.error(f"❌ Failed to log code execution {run_id}/{step_id}/{call_index}: {str(e)}")
+            # Don't raise — code execution logging failure shouldn't break the main flow
+
     def log_artifact(self, session_id: str, artifact_id: str, artifact_type: str, metadata: Optional[Dict[str, str]] = None) -> None:
         """Log a file or thread artifact to the artifact_registry container for retention tracking.
         
@@ -1758,7 +1917,7 @@ class ChatService:
                 
                 # Run thread
                 correlation.log_info("🤖 Running AI thread")
-                run_result = self.foundry_service.run_thread(thread_id, self.get_agent_id())
+                run_result = self.foundry_service.run_thread(thread_id, self.get_agent_id(), session_id=session_id)
                 
                 if run_result["status"] == "completed":
                     # Get response

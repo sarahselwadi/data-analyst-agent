@@ -551,6 +551,20 @@ erDiagram
         string deletion_error "Set by deletion job if failed"
     }
 
+    CODE_EXECUTION_DOC {
+        string id PK "run_id + step_id + call_index + timestamp_ms"
+        string session_id "Conversation/session ID — PARTITION KEY"
+        string thread_id "Azure AI Foundry thread ID"
+        string run_id "Azure AI Foundry run ID"
+        string step_id "Run step ID"
+        int call_index "0-based tool call index within step"
+        string code_input "Python code sent to Code Interpreter"
+        array outputs "logs and image outputs"
+        string status "completed | failed"
+        string created_at "ISO timestamp"
+        string date "YYYY-MM-DD for date-based queries"
+    }
+
     INTERACTION_LOG {
         string id PK "session_id + thread_id + timestamp"
         string session_id
@@ -568,6 +582,7 @@ erDiagram
     SESSION_MAPPING ||--o{ GENERATED_FILE_ENTRY : "generated_files[]"
     SESSION_MAPPING ||--o{ INTERACTION_LOG : "session_id"
     SESSION_MAPPING ||--o{ ARTIFACT_REGISTRY_DOC : "session_id"
+    SESSION_MAPPING ||--o{ CODE_EXECUTION_DOC : "session_id"
 ```
 
 ---
