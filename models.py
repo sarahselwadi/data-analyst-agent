@@ -176,6 +176,62 @@ class FoundryAgentService:
             subfolder='files-gen'
         return default_ext, content_type,subfolder
 
+    def _strip_file_annotations(self, text: str, annotations: list) -> str:
+        """Remove sandbox file-path links from AI response text.
+        
+        The AI agent embeds markdown-style sandbox links like
+        [Download file](sandbox:/mnt/data/file.csv) in its text responses.
+        These are meaningless to the client since files are delivered
+        separately via the SSE attachments event with proper blob SAS URLs.
+        
+        Args:
+            text: The raw text content from the AI agent response.
+            annotations: The list of annotation objects from content.text.annotations.
+            
+        Returns:
+            Cleaned text with all sandbox file-path references removed.
+        """
+        import re
+
+        # Step 1: For each file_path annotation, remove the FULL markdown link
+        # that wraps the ann.text span. The SDK's ann.text is typically just the
+        # sandbox path portion inside the parentheses, e.g.
+        #   "sandbox:/mnt/data/file.csv"
+        # but the actual text in the message looks like:
+        #   "[Download file.csv](sandbox:/mnt/data/file.csv)"
+        # We need to find and remove the entire markdown link, not just ann.text.
+        for ann in annotations:
+            ann_type = getattr(ann, 'type', None) or getattr(ann, 'annotation_type', None)
+            if (ann_type == 'file_path') or hasattr(ann, 'file_path'):
+                ann_text = getattr(ann, 'text', None)
+                if ann_text and ann_text in text:
+                    # Try to find a markdown link [...](ann_text) wrapping this annotation
+                    # Escape the ann_text for use in regex
+                    escaped = re.escape(ann_text)
+                    # Match [any visible text](ann_text) — the full markdown link
+                    pattern = r'\[[^\]]*\]\(' + escaped + r'\)'
+                    new_text = re.sub(pattern, '', text)
+                    if new_text != text:
+                        text = new_text
+                    else:
+                        # Fallback: ann.text might BE the full markdown link, or just a bare reference
+                        text = text.replace(ann_text, '')
+
+        # Step 2: Regex fallback — catch any remaining [text](sandbox:/...) patterns
+        text = re.sub(r'\[([^\]]*)\]\(sandbox:/[^)]*\)', '', text)
+
+        # Step 3: Remove bare sandbox:/ URLs
+        text = re.sub(r'sandbox:/\S+', '', text)
+
+        # Step 4: Clean up artifacts — orphaned empty brackets, double spaces, trailing whitespace
+        text = re.sub(r'\[\s*\]\(\s*\)', '', text)    # empty []()
+        text = re.sub(r'\[([^\]]*)\]\(\s*\)', '', text)  # [text]() with empty href
+        text = re.sub(r' {2,}', ' ', text)             # collapse multiple spaces
+        text = re.sub(r'\n{3,}', '\n\n', text)         # collapse 3+ newlines to 2
+        text = '\n'.join(line.rstrip() for line in text.splitlines())  # trailing whitespace per line
+
+        return text.strip()
+
     def upload_file(self, file_path: str) -> str:
         logging.info(f"Upload file function called for path: {file_path}")
         """Upload a file to Azure AI Foundry and return file ID"""
@@ -290,16 +346,70 @@ class FoundryAgentService:
                 self._base_agent = self.client.agents.create_agent(
                     model=self.model,
                     name="data-analyst-agent",
-                    instructions="""You are a helpful data analyst agent. You can analyze data, create visualizations, and answer questions about uploaded documents. 
+                    instructions="""You are a professional data analyst assistant deployed as an internal tool for bank employees. You operate within a secure, enterprise environment and serve analysts, risk managers, compliance officers, and business stakeholders across the organization.
 
-Key capabilities:
-- Analyze CSV, Excel, and other data files
-- Create charts and visualizations using matplotlib, seaborn, or plotly
-- Perform statistical analysis and data exploration
-- Generate insights and summaries from data
-- Answer questions about uploaded documents
+Your Environment:
+- You are embedded in an internal banking application accessible only to authorized employees.
+- Users may upload CSV, Excel, JSON, PDF, and other data files for analysis.
+- You have access to a Python code interpreter for data processing, statistical analysis, and visualization.
+- Generated files (charts, cleaned datasets, reports) are automatically stored and delivered to the user.
+- Dont refer the user to the path of the saved file, this is already handled by our application code.
 
-Always save any charts or images you create to the current directory and provide the file paths in your response. When analyzing data, provide clear insights and actionable recommendations.""",
+Communication Standards:
+- Maintain a professional, concise tone appropriate for a banking environment.
+- Structure responses with clear headings, bullet points, and numbered lists where appropriate.
+- Lead with an executive summary of key findings before diving into details.
+- Provide actionable recommendations backed by the data.
+- When presenting numbers, use proper formatting (thousands separators, currency symbols, percentage signs, decimal precision appropriate to context).
+- Avoid jargon unless the user's query indicates domain expertise; when using technical terms, briefly explain them.
+- If data is ambiguous or incomplete, clearly state your assumptions rather than guessing silently.
+
+Data Analysis Best Practices:
+- Always start with data quality assessment: check for missing values, duplicates, data types, and outliers before analysis.
+- Flag anomalies and outliers explicitly — in banking data, these may indicate fraud, errors, or significant events.
+- Use appropriate statistical methods: choose the right test or metric for the data type and distribution (e.g., median over mean for skewed distributions).
+- Show your methodology: briefly explain what analysis steps you performed so the user can validate and trust the results.
+- Provide context for metrics: don't just state a number — explain what it means (e.g., "The 30-day default rate increased by 2.3 percentage points, which is above the historical standard deviation of 0.8pp").
+- When working with time series data, consider seasonality, trends, and cyclical patterns.
+- For comparative analysis, ensure you're comparing like-for-like (same time periods, same segments, etc.).
+
+Visualization Standards:
+- Create clean, professional charts suitable for management presentations and internal reports.
+- Always include: descriptive title, axis labels with units, legend (when multiple series), and data source annotation where relevant.
+- Use a consistent, professional color palette — avoid overly bright or clashing colors. Prefer muted blues, grays, and greens appropriate for financial reporting.
+- Choose the right chart type for the data: bar/column for categorical comparisons, line for trends, scatter for correlations, heatmaps for matrices, pie only for parts-of-whole with 5 or fewer categories.
+- Set appropriate axis ranges — don't truncate axes in misleading ways.
+- For large datasets, consider aggregation or sampling to keep visualizations readable.
+- Save charts at high resolution (300 DPI when possible) for print-ready quality.
+
+File Naming Rules (CRITICAL — follow strictly):
+- Give every generated file a clear, descriptive name that reflects its content and analysis type.
+  Good examples: revenue_by_region_q4_2025.png, cleaned_transaction_data.csv, risk_score_distribution.xlsx
+  Bad examples: output.csv, chart.png, data.xlsx, file1.csv
+- Never reuse the same filename within a conversation. If generating multiple similar files, differentiate them clearly (e.g., monthly_trend_revenue.png and monthly_trend_expenses.png).
+- Use lowercase with underscores (snake_case) for all filenames.
+- Include the data subject, metric, or analysis type in the name.
+- For time-specific outputs, include the relevant period: loan_defaults_jan_2025.csv
+- Never include sensitive information (customer names, account numbers, PII) in filenames.
+
+Security & Compliance Awareness:
+- Never include PII (customer names, account numbers, SSNs, addresses) in filenames, chart titles, or annotations.
+- When displaying sample data, mask or truncate sensitive fields (e.g., show last 4 digits of account numbers).
+- Treat all uploaded data as internal/confidential by default.
+- If asked to perform analysis that could lead to discriminatory outcomes, flag the concern and suggest compliant alternatives.
+
+Output Structure (adapt to complexity — not all sections needed for simple queries):
+1. Executive Summary — 2-3 sentence overview of key findings
+2. Data Overview — brief description of the dataset (rows, columns, date range, key fields)
+3. Key Findings — numbered list of insights, ordered by importance
+4. Visualizations — charts with clear explanations of what they show
+5. Recommendations — actionable next steps based on the analysis
+6. Caveats & Assumptions — any limitations, data quality issues, or assumptions made
+
+Error Handling:
+- If a file cannot be read or parsed, explain the issue clearly and suggest what format or structure is expected.
+- If the requested analysis is not possible with the provided data, explain why and suggest what additional data would be needed.
+- Never fabricate data or results — if you cannot determine something from the data, say so explicitly.""",
                     tools=code_interpreter.definitions,
                 )
                 logging.info(f"Dynamic agent created: {self._base_agent.id}")
@@ -484,7 +594,17 @@ Always save any charts or images you create to the current directory and provide
 
                                 if file_id:
                                     try:
-                                        output_filename = f"{file_id}{ext}"
+                                        # Use sandbox filename if available, fall back to file_id-based name
+                                        if isinstance(sandbox_path, str) and os.path.basename(sandbox_path).strip():
+                                            output_filename = os.path.basename(sandbox_path)
+                                            # Apply extension correction if sandbox defaulted to .png but content says otherwise
+                                            sandbox_base, sandbox_ext = os.path.splitext(output_filename)
+                                            if sandbox_ext.lower() == '.png' and ext != '.png':
+                                                output_filename = f"{sandbox_base}{ext}"
+                                            logging.info(f"Using sandbox filename: {output_filename} (from sandbox_path: {sandbox_path})")
+                                        else:
+                                            output_filename = f"{file_id}{ext}"
+                                            logging.info(f"No sandbox path available, using file_id-based filename: {output_filename}")
 
                                         # Download file bytes via file_id
                                         file_stream = self.client.agents.files.get_content(file_id=file_id)
@@ -502,8 +622,11 @@ Always save any charts or images you create to the current directory and provide
                                                 hint_text=(content.text.value if hasattr(content, 'text') else None)
                                             )
                                             if inferred_ext != ext:
-                                                output_filename = f"{file_id}{inferred_ext}"
+                                                # Update extension and rebuild filename with corrected extension
+                                                sandbox_base_name = os.path.splitext(output_filename)[0]
+                                                output_filename = f"{sandbox_base_name}{inferred_ext}"
                                                 ext = inferred_ext
+                                                logging.info(f"Extension corrected via inference: {output_filename}")
 
                                         # Determine subfolder and content type
                                         sub_folder = self.blob_ops.get_subfolder_for_file_type(output_filename)
@@ -562,6 +685,18 @@ Always save any charts or images you create to the current directory and provide
                                         logging.error(f"Failed to fetch annotated file {file_id}: {str(ann_err)}")
                     except Exception as e:
                         logging.error(f"Failed to process text annotations: {str(e)}")
+
+                    # Strip sandbox file-path links from text now that annotations are processed
+                    if annotations:
+                        raw_text = content.text.value
+                        cleaned_text = self._strip_file_annotations(raw_text, annotations)
+                        if cleaned_text != raw_text:
+                            logging.info(f"Stripped file annotations from text (removed {len(raw_text) - len(cleaned_text)} chars)")
+                            # Update the text content entry we already appended
+                            for item in response_content:
+                                if item.get("type") == "text" and item.get("content") == raw_text:
+                                    item["content"] = cleaned_text
+                                    break
 
                 elif content.type == 'image_file':
                     file_id = content.image_file.file_id
