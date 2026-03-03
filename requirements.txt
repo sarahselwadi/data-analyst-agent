@@ -9,10 +9,6 @@ pandas
 requests
 python-dotenv
 openpyxl
-# OpenTelemetry and Application Insights dependencies
-azure-monitor-opentelemetry
-opentelemetry-sdk
-opentelemetry-api
 azurefunctions-extensions-http-fastapi
 fastapi
 aiohttp>=3.9.0

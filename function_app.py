@@ -2,8 +2,6 @@ import azure.functions as func
 import logging
 import json
 import os
-import time
-from contextlib import nullcontext
 from typing import Optional, Dict, Any, Generator, Union
 
 from models import CosmosSessionService  
@@ -11,51 +9,11 @@ from azurefunctions.extensions.http.fastapi import StreamingResponse, Request
 
 from BlobOperations import BlobOperations_
 
-# Optional Azure Monitor OpenTelemetry (guarded)
-try:
-    from azure.monitor.opentelemetry import configure_azure_monitor
-    from opentelemetry import trace, metrics
-except Exception:  # ImportError or runtime env without these packages
-    configure_azure_monitor = None
-    trace = None
-    metrics = None
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
 # Initialize the function app
 app = func.FunctionApp()
-
-# Enable telemetry to Application Insights when configured
-TELEMETRY_ENABLED = False
-TRACER = None
-REQUEST_COUNTER = None
-LATENCY_HIST = None
-
-try:
-    appinsights_cs = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
-    if appinsights_cs and configure_azure_monitor:
-        configure_azure_monitor(connection_string=appinsights_cs)
-        TELEMETRY_ENABLED = True
-        if trace and metrics:
-            TRACER = trace.get_tracer("clippy-data-detective")
-            METER = metrics.get_meter("clippy-data-detective")
-            REQUEST_COUNTER = METER.create_counter(
-                name="data_analyst_requests",
-                unit="1",
-                description="Count of HTTP requests to data-analyst"
-            )
-            LATENCY_HIST = METER.create_histogram(
-                name="data_analyst_latency_ms",
-                unit="ms",
-                description="End-to-end latency for data-analyst handler"
-            )
-        logging.info("✅ Application Insights telemetry enabled via OpenTelemetry")
-    else:
-        logging.info("ℹ️ Application Insights connection string not set or telemetry lib unavailable; telemetry disabled")
-except Exception as _telemetry_err:
-    TELEMETRY_ENABLED = False
-    logging.warning(f"⚠️ Telemetry initialization failed: {_telemetry_err}")
 
 def get_cors_headers():
     """Get CORS headers for frontend integration"""
@@ -102,81 +60,42 @@ async def chat_with_documents(req: Request):
 
     logging.info('🚀 Chat function triggered')
 
-    start_time = time.time()
-    resp = None
-    status_code = 500
+    try:
+        from models import ChatService
+        chat_service = ChatService()
+        logging.info("🤖 ChatService initialized")
 
-    ctx = TRACER.start_as_current_span("data_analyst") if TRACER else nullcontext()
-    with ctx as span:
-        try:
+        # Handle both form data (file uploads) and JSON requests
+        logging.info(f"📝 Request method: {req.method}")
+        logging.info(f"🌐 Request Header: {req.url}")
+        logging.info(f"📥 Request content-type: {req.headers.get('content-type', '')}")
+        logging.info("Start Request Processing ....")
+        
+        return await _handle_multipart_request(req, chat_service)
 
-            from models import ChatService
-            chat_service = ChatService()
-            logging.info("🤖 ChatService initialized")
+    except ImportError as e:
+        logging.error(f"❌ Import error: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Service configuration error",
+                "message": "Dependencies are not available. Please check server logs."
+            }),
+            status_code=500,
+            mimetype="application/json",
+            headers=get_cors_headers()
+        )
 
-            # Handle both form data (file uploads) and JSON requests
-            logging.info(f"📝 Request method: {req.method}")
-            logging.info(f"🌐 Request Header: {req.url}")
-            logging.info(f"📥 Request content-type: {req.headers.get('content-type', '')}")
-            logging.info("Start Request Processing ....")
-            
-            resp = await _handle_multipart_request(req, chat_service)
-
-        except ImportError as e:
-            logging.error(f"❌ Import error: {str(e)}")
-            if span and hasattr(span, "record_exception"):
-                span.record_exception(e)
-                span.set_attribute("error.type", "ImportError")
-            # Always return error; no mock responses
-            resp = func.HttpResponse(
-                json.dumps({
-                    "error": "Service configuration error",
-                    "message": "Dependencies are not available. Please check server logs."
-                }),
-                status_code=500,
-                mimetype="application/json",
-                headers=get_cors_headers()
-            )
-
-        except Exception as e:
-            logging.error(f"❌ Unexpected error in chat function: {str(e)}", exc_info=True)
-            if span and hasattr(span, "record_exception"):
-                span.record_exception(e)
-                span.set_attribute("error", True)
-            resp = func.HttpResponse(
-                json.dumps({
-                    "error": "Internal server error",
-                    "message": "An unexpected error occurred while processing your request"
-                }),
-                status_code=500,
-                mimetype="application/json",
-                headers=get_cors_headers()
-            )
-        finally:
-            # Metrics and span attributes
-            duration_ms = int((time.time() - start_time) * 1000)
-            if resp is not None:
-                try:
-                    status_code = getattr(resp, "status_code", status_code) or status_code
-                except Exception:
-                    pass
-            if REQUEST_COUNTER:
-                REQUEST_COUNTER.add(1, attributes={
-                    "route": "data-analyst",
-                    "method": req.method,
-                    "status_code": str(status_code),
-                })
-            if LATENCY_HIST:
-                LATENCY_HIST.record(duration_ms, attributes={
-                    "route": "data-analyst",
-                    "method": req.method,
-                    "status_code": str(status_code),
-                })
-            if span and hasattr(span, "set_attribute"):
-                span.set_attribute("app.duration_ms", duration_ms)
-                span.set_attribute("http.status_code", status_code)
-
-    return resp  # type: ignore[return-value]
+    except Exception as e:
+        logging.error(f"❌ Unexpected error in chat function: {str(e)}", exc_info=True)
+        return func.HttpResponse(
+            json.dumps({
+                "error": "Internal server error",
+                "message": "An unexpected error occurred while processing your request"
+            }),
+            status_code=500,
+            mimetype="application/json",
+            headers=get_cors_headers()
+        )
 
 async def _handle_multipart_request(req: Request, chat_service):
     """Handle multipart/form-data requests (file uploads)"""
@@ -187,7 +106,7 @@ async def _handle_multipart_request(req: Request, chat_service):
 
         session_id = body.get('conversationId')
         query = body.get('query')
-        attachments =body.get("attachments") or []
+        attachments = body.get("attachments") or []
 
         file_ids = []
         if len(attachments) > 0:

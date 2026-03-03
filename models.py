@@ -3,7 +3,6 @@ import logging
 import time
 import tempfile
 import requests
-from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from azure.ai.projects import AIProjectClient
@@ -11,22 +10,6 @@ from azure.identity import DefaultAzureCredential
 from azure.ai.agents.models import CodeInterpreterTool, FilePurpose
 from azure.cosmos import CosmosClient, PartitionKey
 from dotenv import load_dotenv
-from telemetry import create_custom_span, add_span_attributes, record_exception, create_correlation_context
-try:
-    from opentelemetry import trace as _otel_trace
-    from opentelemetry.trace import SpanKind as _OTEL_SpanKind
-except Exception:  # opentelemetry optional at import time; function_app guards configuration
-    _otel_trace = None
-    _OTEL_SpanKind = None
-
-# Optional: Agents SDK tracing helper; provide no-op fallback if unavailable
-try:
-    from azure.ai.agents.telemetry import trace_function as _agents_trace_function
-except Exception:  # package might not be present at type-check time
-    def _agents_trace_function(*_args, **_kwargs):
-        def _decorator(fn):
-            return fn
-        return _decorator
 from BlobOperations import BlobOperations_
 
 # Load environment variables
@@ -235,30 +218,17 @@ class FoundryAgentService:
     def upload_file(self, file_path: str) -> str:
         logging.info(f"Upload file function called for path: {file_path}")
         """Upload a file to Azure AI Foundry and return file ID"""
-        with create_custom_span("foundry_upload_file", "ai_foundry"):
-            try:
-                add_span_attributes(
-                    file_path=file_path,
-                    operation="file_upload"
-                )
-                
-                # Upload file to Azure AI Foundry for use with agents
-                uploaded_file = self.client.agents.files.upload_and_poll(
-                    file_path=file_path,
-                    purpose=FilePurpose.AGENTS
-                )
-                
-                add_span_attributes(
-                    file_id=uploaded_file.id,
-                    upload_status="success"
-                )
-                
-                logging.info(f"File uploaded successfully: {uploaded_file.id}")
-                return uploaded_file.id
-            except Exception as e:
-                record_exception(e, "foundry_upload_file_error")
-                logging.error(f"Failed to upload file {file_path}: {str(e)}")
-                raise
+        try:
+            # Upload file to Azure AI Foundry for use with agents
+            uploaded_file = self.client.agents.files.upload_and_poll(
+                file_path=file_path,
+                purpose=FilePurpose.AGENTS
+            )
+            logging.info(f"File uploaded successfully: {uploaded_file.id}")
+            return uploaded_file.id
+        except Exception as e:
+            logging.error(f"Failed to upload file {file_path}: {str(e)}")
+            raise
     
     def upload_file_from_bytes(self, file_content: bytes, filename: str) -> str:
         logging.info(f"Upload file from bytes function called for filename: {filename}")
@@ -267,40 +237,26 @@ class FoundryAgentService:
         Writes bytes to a temp file, uploads to AI Foundry, cleans up, returns file_id.
         User attachments already live in the input blob container — no need to re-upload them.
         """
-        with create_custom_span("foundry_upload_file_from_bytes", "ai_foundry"):
+        try:
+            logging.info(f"📤 Starting file upload to AI Foundry: {filename} ({len(file_content)} bytes)")
+            
+            # Create a temporary file and upload it
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{filename.split('.')[-1]}") as temp_file:
+                temp_file.write(file_content)
+                temp_file_path = temp_file.name
+            
             try:
-                logging.info(f"📤 Starting file upload to AI Foundry: {filename} ({len(file_content)} bytes)")
-
-                add_span_attributes(
-                    filename=filename,
-                    file_size=len(file_content),
-                    operation="file_upload_from_bytes"
-                )
-                
-                # Create a temporary file and upload it
-                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{filename.split('.')[-1]}") as temp_file:
-                    temp_file.write(file_content)
-                    temp_file_path = temp_file.name
-                
-                try:
-                    file_id = self.upload_file(temp_file_path)
-                    add_span_attributes(
-                        file_id=file_id,
-                        upload_status="success"
-                    )
-                    # NEW: Enhanced logging for Azure AI Foundry upload
-                    logging.info(f"🤖 File uploaded to Azure AI Foundry: {file_id}")
-                    logging.info(f"✅ File upload completed successfully: {filename}")
-                    return file_id
-                finally:
-                    # Clean up temporary file
-                    if os.path.exists(temp_file_path):
-                        os.unlink(temp_file_path)
-            except Exception as e:
-                # EXISTING CODE: Original error handling (unchanged)
-                record_exception(e, "foundry_upload_file_from_bytes_error")
-                logging.error(f"❌ Failed to upload file from bytes {filename}: {str(e)}")
-                raise
+                file_id = self.upload_file(temp_file_path)
+                logging.info(f"🤖 File uploaded to Azure AI Foundry: {file_id}")
+                logging.info(f"✅ File upload completed successfully: {filename}")
+                return file_id
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_file_path):
+                    os.unlink(temp_file_path)
+        except Exception as e:
+            logging.error(f"❌ Failed to upload file from bytes {filename}: {str(e)}")
+            raise
     
     def upload_document_from_url(self, url: str) -> str:
         logging.info(f"Upload document from URL function called for URL: {url}")
@@ -429,93 +385,60 @@ Error Handling:
             logging.error(f"Failed to create thread: {str(e)}")
             raise
     
-    @_agents_trace_function()
     def create_message(self, thread_id: str, content: str, file_ids: List[str] = None) -> str:
         """Create a message in the thread with file attachments for code interpreter"""
-        with create_custom_span("foundry_create_message", "ai_foundry"):
-            try:
-                add_span_attributes(
-                    thread_id=thread_id,
-                    content_length=len(content),
-                    file_count=len(file_ids) if file_ids else 0,
-                    operation="create_message"
-                )
-                
-                # Prepare attachments for code interpreter
-                attachments = []
-                if file_ids:
-                    logging.info(f"💬 Creating message with files | thread_id={thread_id} | file_count={len(file_ids)}")
-                    for file_id in file_ids:
-                        attachments.append({
-                            "file_id": file_id,
-                            "tools": [{"type": "code_interpreter"}]
-                        })
-                else:
-                    logging.info(f"💬 Creating text message | thread_id={thread_id} | content_length={len(content)}")
-                
-                # Create message with attachments
-                message = self.client.agents.messages.create(
-                    thread_id=thread_id,
-                    role="user",
-                    content=content,
-                    attachments=attachments if attachments else None
-                )
-                
-                # SDK telemetry decorator will emit agent spans; no extra dependency span to avoid duplicates
+        try:
+            # Prepare attachments for code interpreter
+            attachments = []
+            if file_ids:
+                logging.info(f"💬 Creating message with files | thread_id={thread_id} | file_count={len(file_ids)}")
+                for file_id in file_ids:
+                    attachments.append({
+                        "file_id": file_id,
+                        "tools": [{"type": "code_interpreter"}]
+                    })
+            else:
+                logging.info(f"💬 Creating text message | thread_id={thread_id} | content_length={len(content)}")
+            
+            # Create message with attachments
+            message = self.client.agents.messages.create(
+                thread_id=thread_id,
+                role="user",
+                content=content,
+                attachments=attachments if attachments else None
+            )
+            
+            logging.info(f"✅ Message created successfully | thread_id={thread_id} | message_id={message.id} | attachments={len(attachments)}")
+            return message.id
+        except Exception as e:
+            logging.error(f"❌ Failed to create message | thread_id={thread_id} | error={str(e)}")
+            raise
 
-                add_span_attributes(
-                    message_id=message.id,
-                    message_created=True
-                )
-                
-                logging.info(f"✅ Message created successfully | thread_id={thread_id} | message_id={message.id} | attachments={len(attachments)}")
-                return message.id
-            except Exception as e:
-                record_exception(e, "foundry_create_message_error")
-                logging.error(f"❌ Failed to create message | thread_id={thread_id} | error={str(e)}")
-                raise
-
-    @_agents_trace_function()
     def run_thread(self, thread_id: str, agent_id: str, session_id: str = None) -> Dict[str, Any]:
-        """Run the thread and wait for completion with correlation tracking"""
-        with create_custom_span("foundry_run_thread", "ai_foundry"):
-            try:
-                add_span_attributes(
-                    thread_id=thread_id,
-                    agent_id=agent_id,
-                    operation="run_thread"
-                )
-                
-                logging.info(f"🤖 Starting AI agent run | thread_id={thread_id} | agent_id={agent_id}")
-                
-                # Use create_and_process which handles the run and waits for completion
-                run = self.client.agents.runs.create_and_process(
-                    thread_id=thread_id,
-                    agent_id=agent_id
-                )
-                
-                # SDK telemetry decorator will emit the start_thread_run span with usage where available
+        """Run the thread and wait for completion"""
+        try:
+            logging.info(f"🤖 Starting AI agent run | thread_id={thread_id} | agent_id={agent_id}")
+            
+            # Use create_and_process which handles the run and waits for completion
+            run = self.client.agents.runs.create_and_process(
+                thread_id=thread_id,
+                agent_id=agent_id
+            )
+            
+            logging.info(f"✅ AI agent run completed | thread_id={thread_id} | run_id={run.id} | status={run.status}")
 
-                add_span_attributes(
-                    run_id=run.id,
-                    run_status=run.status
-                )
-
-                logging.info(f"✅ AI agent run completed | thread_id={thread_id} | run_id={run.id} | status={run.status}")
-
-                # Capture Code Interpreter executions to Cosmos DB
-                if session_id and run.status == "completed":
-                    self.capture_code_interpreter_runs(thread_id, run.id, session_id)
-                
-                return {
-                    "status": run.status,
-                    "run_id": run.id,
-                    "error": getattr(run, 'last_error', None) if run.status != 'completed' else None
-                }
-            except Exception as e:
-                record_exception(e, "foundry_run_thread_error")
-                logging.error(f"❌ AI agent run failed | thread_id={thread_id} | error={str(e)}")
-                raise
+            # Capture Code Interpreter executions to Cosmos DB
+            if session_id and run.status == "completed":
+                self.capture_code_interpreter_runs(thread_id, run.id, session_id)
+            
+            return {
+                "status": run.status,
+                "run_id": run.id,
+                "error": getattr(run, 'last_error', None) if run.status != 'completed' else None
+            }
+        except Exception as e:
+            logging.error(f"❌ AI agent run failed | thread_id={thread_id} | error={str(e)}")
+            raise
     
     async def get_latest_message(self, thread_id: str, run_id: str, session_id: str = None) -> List[Dict[str, Any]]:
         """Get the latest assistant message from the thread.
@@ -785,92 +708,82 @@ Error Handling:
             run_id: Azure AI Foundry run ID (just completed).
             session_id: Conversation/session ID for Cosmos partition key.
         """
-        with create_custom_span("capture_code_interpreter_runs", "ai_foundry"):
-            try:
-                add_span_attributes(
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    session_id=session_id,
-                    operation="capture_code_interpreter_runs"
-                )
+        try:
+            logging.info(f"🔍 Capturing code interpreter runs | thread_id={thread_id} | run_id={run_id}")
 
-                logging.info(f"🔍 Capturing code interpreter runs | thread_id={thread_id} | run_id={run_id}")
+            # List all run steps
+            steps_iter = self.client.agents.run_steps.list(thread_id=thread_id, run_id=run_id)
+            steps_list = list(steps_iter)
+            logging.info(f"Retrieved {len(steps_list)} run steps for code capture")
 
-                # List all run steps
-                steps_iter = self.client.agents.run_steps.list(thread_id=thread_id, run_id=run_id)
-                steps_list = list(steps_iter)
-                logging.info(f"Retrieved {len(steps_list)} run steps for code capture")
+            captured_count = 0
 
-                captured_count = 0
+            for step in steps_list:
+                step_id = getattr(step, 'id', None) or "unknown_step"
+                step_status = getattr(step, 'status', 'unknown')
+                step_details = getattr(step, 'step_details', None)
+                if step_details is None:
+                    continue
 
-                for step in steps_list:
-                    step_id = getattr(step, 'id', None) or "unknown_step"
-                    step_status = getattr(step, 'status', 'unknown')
-                    step_details = getattr(step, 'step_details', None)
-                    if step_details is None:
+                # Get tool_calls from step_details
+                tool_calls = getattr(step_details, 'tool_calls', None)
+                if not tool_calls:
+                    continue
+
+                for call_index, tool_call in enumerate(tool_calls):
+                    # Check if this is a code_interpreter tool call
+                    call_type = getattr(tool_call, 'type', None)
+                    if call_type != "code_interpreter":
                         continue
 
-                    # Get tool_calls from step_details
-                    tool_calls = getattr(step_details, 'tool_calls', None)
-                    if not tool_calls:
+                    # Extract code_interpreter details
+                    ci = getattr(tool_call, 'code_interpreter', None)
+                    if ci is None:
                         continue
 
-                    for call_index, tool_call in enumerate(tool_calls):
-                        # Check if this is a code_interpreter tool call
-                        call_type = getattr(tool_call, 'type', None)
-                        if call_type != "code_interpreter":
-                            continue
+                    # Extract input code
+                    code_input = getattr(ci, 'input', None) or ""
 
-                        # Extract code_interpreter details
-                        ci = getattr(tool_call, 'code_interpreter', None)
-                        if ci is None:
-                            continue
-
-                        # Extract input code
-                        code_input = getattr(ci, 'input', None) or ""
-
-                        # Extract outputs
-                        raw_outputs = getattr(ci, 'outputs', None) or []
-                        outputs = []
-                        for output in raw_outputs:
-                            output_type = getattr(output, 'type', None)
-                            if output_type == "logs":
-                                logs_text = getattr(output, 'logs', None) or ""
-                                outputs.append({"type": "logs", "logs": logs_text})
-                            elif output_type == "image":
-                                image_obj = getattr(output, 'image', None)
-                                file_id = getattr(image_obj, 'file_id', None) if image_obj else None
-                                if file_id:
-                                    outputs.append({"type": "image", "file_id": file_id})
-                                else:
-                                    outputs.append({"type": "image", "file_id": None})
+                    # Extract outputs
+                    raw_outputs = getattr(ci, 'outputs', None) or []
+                    outputs = []
+                    for output in raw_outputs:
+                        output_type = getattr(output, 'type', None)
+                        if output_type == "logs":
+                            logs_text = getattr(output, 'logs', None) or ""
+                            outputs.append({"type": "logs", "logs": logs_text})
+                        elif output_type == "image":
+                            image_obj = getattr(output, 'image', None)
+                            file_id = getattr(image_obj, 'file_id', None) if image_obj else None
+                            if file_id:
+                                outputs.append({"type": "image", "file_id": file_id})
                             else:
-                                # Unknown output type — store what we can
-                                outputs.append({"type": str(output_type), "raw": str(output)})
-
-                        # Log to Cosmos DB via session_service
-                        if hasattr(self, 'session_service') and self.session_service and self.session_service.cosmos_service:
-                            self.session_service.cosmos_service.log_code_execution(
-                                session_id=session_id,
-                                thread_id=thread_id,
-                                run_id=run_id,
-                                step_id=step_id,
-                                call_index=call_index,
-                                code_input=code_input,
-                                outputs=outputs,
-                                status=step_status
-                            )
-                            captured_count += 1
+                                outputs.append({"type": "image", "file_id": None})
                         else:
-                            logging.warning("⚠️ session_service or cosmos_service not available for code execution logging")
+                            # Unknown output type — store what we can
+                            outputs.append({"type": str(output_type), "raw": str(output)})
 
-                add_span_attributes(captured_count=captured_count, total_steps=len(steps_list))
-                logging.info(f"📊 Captured {captured_count} code interpreter executions from {len(steps_list)} run steps")
+                    # Log to Cosmos DB via session_service
+                    if hasattr(self, 'session_service') and self.session_service and self.session_service.cosmos_service:
+                        self.session_service.cosmos_service.log_code_execution(
+                            session_id=session_id,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            step_id=step_id,
+                            call_index=call_index,
+                            code_input=code_input,
+                            outputs=outputs,
+                            status=step_status
+                        )
+                        captured_count += 1
+                    else:
+                        logging.warning("⚠️ session_service or cosmos_service not available for code execution logging")
 
-            except Exception as e:
-                record_exception(e, "capture_code_interpreter_runs_error")
-                logging.error(f"❌ Failed to capture code interpreter runs | thread_id={thread_id} | run_id={run_id} | error={str(e)}")
-                # Don't raise — capture failure shouldn't break the main flow
+            logging.info(f"📊 Captured {captured_count} code interpreter executions from {len(steps_list)} run steps")
+
+        except Exception as e:
+            logging.error(f"❌ Failed to capture code interpreter runs | thread_id={thread_id} | run_id={run_id} | error={str(e)}")
+            # Don't raise — capture failure shouldn't break the main flow
 
     def _capture_run_artifacts(self, thread_id: str, run_id: str, session_id: Optional[str], images_dir: str,
                                 response_content: List[Dict[str, Any]]):
@@ -1201,153 +1114,105 @@ class CosmosSessionService:
     def get_thread_id(self, session_id: str) -> Optional[str]:
         logging.info(f"Retrieving thread ID function called in (cosmos service): {session_id}")
         """Get thread ID for a session from Cosmos DB with robust error handling"""
-        with create_custom_span("cosmos_get_thread_id", "database"):
-            max_retries = 3
-            retry_delay = 1  # Start with 1 second delay
-            
-            add_span_attributes(
-                session_id=session_id,
-                operation="get_thread_id",
-                max_retries=max_retries
-            )
-            
-            for attempt in range(max_retries):
-                try:
-                    add_span_attributes(attempt=attempt + 1)
-                    
-                    # Query for the session with more specific filtering
-                    query = "SELECT c.thread_id FROM c WHERE c.session_id = @session_id  ORDER BY c._ts DESC"
-                    parameters = [{"name": "@session_id", "value": session_id}]
-                    
-                    logging.info(f"Querying Cosmos DB for session: {session_id} (attempt {attempt + 1}/{max_retries})")
-                    
-                    # Use optimized query configuration for cross-partition queries
-                    items = list(self.container.query_items(
-                        query=query,
-                        parameters=parameters,
-                        enable_cross_partition_query=True,  # Required for cross-partition queries
-                        max_item_count=1,                   # Only need the most recent one
-                        populate_query_metrics=True        # Enable query metrics for debugging
-                    ))
-                    
-                    if items:
-                        thread_id = items[0]['thread_id']
-                        add_span_attributes(
-                            thread_id=thread_id,
-                            query_result="found",
-                            attempt_successful=True
-                        )
-                        logging.info(f"Found existing session in Cosmos DB: {session_id} -> {thread_id}")
-                        return thread_id
-                    else:
-                        add_span_attributes(
-                            query_result="not_found",
-                            attempt_successful=True
-                        )
-                        logging.info(f"Session not found in Cosmos DB: {session_id}")
-                        return None
-                        
-                except Exception as e:
-                    record_exception(e, "cosmos_get_thread_id_error")
-                    error_msg = str(e)
-                    logging.error(f"Cosmos DB query attempt {attempt + 1} failed for session {session_id}: {error_msg}")
-                    logging.error(f"Error type: {type(e).__name__}")
-                    
-                    add_span_attributes(
-                        error_type=type(e).__name__,
-                        error_message=error_msg,
-                        attempt_failed=True
-                    )
-                    
-                    # Check if this is a connection-related error that we should retry
-                    if any(keyword in error_msg.lower() for keyword in ['connection', 'timeout', 'remote', 'network', 'aborted']):
-                        if attempt < max_retries - 1:  # Don't sleep on last attempt
-                            logging.info(f"Connection error detected, retrying in {retry_delay} seconds...")
-                            time.sleep(retry_delay)
-                            retry_delay *= 2  # Exponential backoff
-                            continue
-                    
-                    # For non-connection errors or final attempt, return None to allow fallback
-                    logging.error(f"Final attempt failed, returning None to allow graceful fallback")
+        max_retries = 3
+        retry_delay = 1  # Start with 1 second delay
+
+        for attempt in range(max_retries):
+            try:
+                # Query for the session with more specific filtering
+                query = "SELECT c.thread_id FROM c WHERE c.session_id = @session_id  ORDER BY c._ts DESC"
+                parameters = [{"name": "@session_id", "value": session_id}]
+
+                logging.info(f"Querying Cosmos DB for session: {session_id} (attempt {attempt + 1}/{max_retries})")
+
+                # Use optimized query configuration for cross-partition queries
+                items = list(self.container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,  # Required for cross-partition queries
+                    max_item_count=1,                   # Only need the most recent one
+                    populate_query_metrics=True        # Enable query metrics for debugging
+                ))
+
+                if items:
+                    thread_id = items[0]['thread_id']
+                    logging.info(f"Found existing session in Cosmos DB: {session_id} -> {thread_id}")
+                    return thread_id
+                else:
+                    logging.info(f"Session not found in Cosmos DB: {session_id}")
                     return None
-            
-            add_span_attributes(all_attempts_failed=True)
-            logging.error(f"All {max_retries} attempts failed for session {session_id}")
-            return None
+
+            except Exception as e:
+                error_msg = str(e)
+                logging.error(f"Cosmos DB query attempt {attempt + 1} failed for session {session_id}: {error_msg}")
+                logging.error(f"Error type: {type(e).__name__}")
+
+                # Check if this is a connection-related error that we should retry
+                if any(keyword in error_msg.lower() for keyword in ['connection', 'timeout', 'remote', 'network', 'aborted']):
+                    if attempt < max_retries - 1:  # Don't sleep on last attempt
+                        logging.info(f"Connection error detected, retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+
+                # For non-connection errors or final attempt, return None to allow fallback
+                logging.error(f"Final attempt failed, returning None to allow graceful fallback")
+                return None
+
+        logging.error(f"All {max_retries} attempts failed for session {session_id}")
+        return None
     
     def save_session(self, session_id: str, thread_id: str) -> None:
         logging.info(f"Saving session function called in (cosmos service): {session_id} -> {thread_id}")
         """Save session with thread ID to Cosmos DB with retry logic"""
-        with create_custom_span("cosmos_save_session", "database"):
-            max_retries = 3
-            retry_delay = 1
-            
-            add_span_attributes(
-                session_id=session_id,
-                thread_id=thread_id,
-                operation="save_session",
-                max_retries=max_retries
-            )
-            
-            for attempt in range(max_retries):
-                try:
-                    add_span_attributes(attempt=attempt + 1)
-                    
-                    # Create session document with file tracking
-                    session_doc = {
-                        "id": f"{session_id}_{int(time.time())}",
-                        "session_id": session_id,
-                        "thread_id": thread_id,
-                        "uploaded_files": [],  # NEW: Track user uploaded file IDs
-                        "generated_files": [], # NEW: Track AI generated file IDs
-                        "created_at": datetime.now(timezone.utc).isoformat(),
-                        "last_updated": datetime.now(timezone.utc).isoformat(),
-                        "type": "session_mapping"
-                    }
-                    
-                    # Upsert the document
-                    self.container.upsert_item(session_doc)
-                    
-                    add_span_attributes(
-                        save_result="success",
-                        attempt_successful=True
-                    )
-                    
-                    logging.info(f"Session saved to Cosmos DB: {session_id} -> {thread_id}")
-                    
-                    # Log thread as artifact for retention tracking
-                    self.log_artifact(
-                        session_id=session_id,
-                        artifact_id=thread_id,
-                        artifact_type="thread",
-                        metadata={"source": "session_creation"}
-                    )
-                    
-                    return  # Success, exit the retry loop
-                    
-                except Exception as e:
-                    record_exception(e, "cosmos_save_session_error")
-                    error_msg = str(e)
-                    logging.error(f"Save session attempt {attempt + 1} failed: {error_msg}")
-                    
-                    add_span_attributes(
-                        error_type=type(e).__name__,
-                        error_message=error_msg,
-                        attempt_failed=True
-                    )
-                    
-                    # Check if this is a connection-related error that we should retry
-                    if any(keyword in error_msg.lower() for keyword in ['connection', 'timeout', 'remote', 'network', 'aborted']):
-                        if attempt < max_retries - 1:  # Don't sleep on last attempt
-                            logging.info(f"Connection error detected, retrying save in {retry_delay} seconds...")
-                        time.sleep(retry_delay)
-                        retry_delay *= 2  # Exponential backoff
-                        continue
-                
-                # For non-connection errors or final attempt, re-raise
-                logging.error(f"Final save attempt failed, re-raising exception")
-                raise
-        
+        max_retries = 3
+        retry_delay = 1
+
+        for attempt in range(max_retries):
+            try:
+                # Create session document with file tracking
+                session_doc = {
+                    "id": f"{session_id}_{int(time.time())}",
+                    "session_id": session_id,
+                    "thread_id": thread_id,
+                    "uploaded_files": [],  # Track user uploaded file IDs
+                    "generated_files": [], # Track AI generated file IDs
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "last_updated": datetime.now(timezone.utc).isoformat(),
+                    "type": "session_mapping"
+                }
+
+                # Upsert the document
+                self.container.upsert_item(session_doc)
+
+                logging.info(f"Session saved to Cosmos DB: {session_id} -> {thread_id}")
+
+                # Log thread as artifact for retention tracking
+                self.log_artifact(
+                    session_id=session_id,
+                    artifact_id=thread_id,
+                    artifact_type="thread",
+                    metadata={"source": "session_creation"}
+                )
+
+                return  # Success, exit the retry loop
+
+            except Exception as e:
+                error_msg = str(e)
+                logging.error(f"Save session attempt {attempt + 1} failed: {error_msg}")
+
+                # Check if this is a connection-related error that we should retry
+                if any(keyword in error_msg.lower() for keyword in ['connection', 'timeout', 'remote', 'network', 'aborted']):
+                    if attempt < max_retries - 1:  # Don't sleep on last attempt
+                        logging.info(f"Connection error detected, retrying save in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    continue
+
+            # For non-connection errors or final attempt, re-raise
+            logging.error(f"Final save attempt failed, re-raising exception")
+            raise Exception(f"Save session failed after attempt {attempt + 1}")
+
         logging.error(f"All {max_retries} save attempts failed for session {session_id}")
         raise Exception(f"Failed to save session after {max_retries} attempts")
     
@@ -1683,75 +1548,58 @@ class ChatService:
   
     async def process_chat_request_with_files(self, session_id: str, query: str, file_ids: List[str] = None) -> Dict[str, Any]:
         """Process a complete chat request with already uploaded file IDs"""
-        with create_correlation_context(session_id=session_id) as correlation:
-            start_time = time.time()
-            thread_id = None
-            
-            try:
-                correlation.log_info("🚀 Starting chat request with uploaded files",
-                                   query_length=len(query),
-                                   file_count=len(file_ids) if file_ids else 0)
-                
-                # NEW: Set current session ID on foundry service for proper blob organization
-                self.foundry_service._current_session_id = session_id
-                
-                # Get or create thread
-                correlation.log_info("🧵 Getting or creating thread")
-                thread_id = self.get_or_create_thread(session_id)
-                
-                # Update correlation context with thread_id
-                correlation.correlation_data["thread_id"] = thread_id
-                correlation.log_info("🔗 Thread correlation established",
-                                   thread_id=thread_id)
-                
-                # Create message
-                correlation.log_info("💬 Creating message in thread",
-                                   file_count=len(file_ids) if file_ids else 0)
-                self.foundry_service.create_message(thread_id, query, file_ids or [])
-                
-                # Run thread
-                correlation.log_info("🤖 Running AI thread")
-                run_result = self.foundry_service.run_thread(thread_id, self.get_agent_id(), session_id=session_id)
-                
-                if run_result["status"] == "completed":
-                    # Get response
-                    correlation.log_info("📨 Retrieving AI response")
-                    response_content = await self.foundry_service.get_latest_message(thread_id, run_result['run_id'], session_id)
-                    execution_time = time.time() - start_time
-                    
-                    correlation.log_info("✅ Chat request with files completed successfully",
-                                       execution_time=execution_time,
-                                       response_length=len(str(response_content)))
-                    
- 
-                    
-                    return {
-                        "session_id": session_id,
-                        "thread_id": thread_id,
-                        "response": response_content,
-                        "status": "completed",
-                        "file_ids": file_ids or []
-                    }
-                else:
-                    correlation.log_error("❌ AI thread run failed",
-                                        run_status=run_result['status'],
-                                        error_details=run_result.get("error"))
-                    return {
-                        "session_id": session_id,
-                        "thread_id": thread_id,
-                        "status": "error",
-                        "error": f"Run failed with status: {run_result['status']}",
-                        "details": run_result.get("error")
-                    }
-                    
-            except Exception as e:
-                correlation.log_error("💥 Chat request with files processing failed",
-                                    error=str(e),
-                                    thread_id=thread_id)
-                logging.error(f"Chat request processing failed: {str(e)}")
+        start_time = time.time()
+        thread_id = None
+
+        try:
+            logging.info(f"🚀 Starting chat request | session_id={session_id} | query_length={len(query)} | file_count={len(file_ids) if file_ids else 0}")
+
+            # Set current session ID on foundry service for proper blob organization
+            self.foundry_service._current_session_id = session_id
+
+            # Get or create thread
+            logging.info("🧵 Getting or creating thread")
+            thread_id = self.get_or_create_thread(session_id)
+            logging.info(f"🔗 Thread ready | thread_id={thread_id}")
+
+            # Create message
+            logging.info(f"💬 Creating message in thread | file_count={len(file_ids) if file_ids else 0}")
+            self.foundry_service.create_message(thread_id, query, file_ids or [])
+
+            # Run thread
+            logging.info("🤖 Running AI thread")
+            run_result = self.foundry_service.run_thread(thread_id, self.get_agent_id(), session_id=session_id)
+
+            if run_result["status"] == "completed":
+                # Get response
+                logging.info("📨 Retrieving AI response")
+                response_content = await self.foundry_service.get_latest_message(thread_id, run_result['run_id'], session_id)
+                execution_time = time.time() - start_time
+
+                logging.info(f"✅ Chat request completed | execution_time={execution_time:.2f}s | response_length={len(str(response_content))}")
+
+                return {
+                    "session_id": session_id,
+                    "thread_id": thread_id,
+                    "response": response_content,
+                    "status": "completed",
+                    "file_ids": file_ids or []
+                }
+            else:
+                logging.error(f"❌ AI thread run failed | run_status={run_result['status']} | error={run_result.get('error')}")
                 return {
                     "session_id": session_id,
                     "thread_id": thread_id,
                     "status": "error",
-                    "error": str(e)
+                    "error": f"Run failed with status: {run_result['status']}",
+                    "details": run_result.get("error")
                 }
+
+        except Exception as e:
+            logging.error(f"💥 Chat request processing failed | session_id={session_id} | thread_id={thread_id} | error={str(e)}")
+            return {
+                "session_id": session_id,
+                "thread_id": thread_id,
+                "status": "error",
+                "error": str(e)
+            }
