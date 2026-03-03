@@ -767,159 +767,6 @@ Error Handling:
                             "error": str(e)
                         })
             
-            # Process all messages for any additional files (annotations)
-        #     try:
-        #         all_messages = self.client.agents.messages.list(thread_id=thread_id)
-        #         logging.info(f"Inspecting all messages for additional file annotations")
-        #         for msg in list(all_messages):
-        #             # Check for file_path_annotations (generated files from code execution)
-        #             if hasattr(msg, 'file_path_annotations') and msg.file_path_annotations:
-        #                 for file_annotation in msg.file_path_annotations:
-        #                     try:
-        #                         file_id = file_annotation.file_path.file_id
-                                
-        #                         # Skip if already processed (using blob metadata for persistent tracking)
-        #                         # Note: This method is a fallback, main tracking is done in get_latest_message
-                                    
-        #                         logging.info(f"Downloading file from annotation: {file_id}")
-                                
-        #                         # Determine file extension based on annotation text
-        #                         annotation_text = file_annotation.text
-        #                         logging.info(f"annotation_text: {annotation_text}")
-        #                         file_extension = ".png" 
-        #                         file_subfolder = "imgs" # Default to PNG for charts/images
-        #                         if ".csv" in annotation_text.lower():
-        #                             file_extension = ".csv"
-        #                             file_subfolder = "files-gen"
-        #                         elif ".xlsx" in annotation_text.lower():
-        #                             file_extension = ".xlsx"
-        #                             file_subfolder = "files-gen"
-        #                         elif ".json" in annotation_text.lower():
-        #                             file_extension = ".json"
-        #                             file_subfolder = "files-gen"
-        #                         elif ".txt" in annotation_text.lower():
-        #                             file_extension = ".txt"
-        #                             file_subfolder = "files-gen"
-        #                         # If defaulted to .png, try inferring a better extension from content
-        #                         inferred_ext, inferred_ct = (file_extension, None)
-        #                         if file_extension == '.png':
-        #                             inferred_ext, inferred_ct,file_subfolder = self._infer_ext_and_content_type(
-        #                                 content_bytes,
-        #                                 default_ext=file_extension,
-        #                                 hint_text=annotation_text
-        #                             )
-        #                         output_filename = f"{file_id}{inferred_ext}"
-        #                         # output_path = os.path.join(images_dir, output_filename) if images_dir else None
-        #                         output_path=f"{session_id}/{file_subfolder}/{file_id}{inferred_ext}"
-        #                         logging.info(f"Determined output filename: {output_filename}, path: {output_path}")
-        #                         # Get file content bytes
-        #                         stream = self.client.agents.files.get_content(file_id=file_id)
-        #                         content_bytes = b""
-        #                         for chunk in stream:
-        #                             content_bytes += chunk
-
-        #                         # Save locally if enabled
-        #                         if output_path:
-        #                             try:
-        #                                 with open(output_path, 'wb') as f:
-        #                                     f.write(content_bytes)
-        #                             except Exception as write_err:
-        #                                 logging.warning(f"Skipping local write for file annotation {output_filename}: {write_err}")
-
-        #                         # File processed - tracking handled by blob metadata system
-
-        #                         # Upload to blob if enabled
-        #                         if self.enable_blob_storage and self.blob_service:
-        #                             content_type = 'application/octet-stream'
-        #                             if inferred_ext == '.csv':
-        #                                 content_type = 'text/csv'
-        #                             elif inferred_ext == '.xlsx':
-        #                                 content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        #                             elif inferred_ext == '.json':
-        #                                 content_type = 'application/json'
-        #                             elif inferred_ext == '.txt':
-        #                                 content_type = 'text/plain'
-        #                             elif inferred_ext in ['.png', '.jpg', '.jpeg', '.svg']:
-        #                                 content_type = 'image/png' if inferred_ext == '.png' else ('image/svg+xml' if inferred_ext == '.svg' else 'image/jpeg')
-
-        #                             subfolder=file_subfolder
-        #                             upload = self.blob_service.upload_file(
-        #                                 session_id=session_id or 'unknown-session',
-        #                                 file_content=content_bytes,
-        #                                 filename=output_filename,
-        #                                 content_type=content_type,
-        #                                 metadata={
-        #                                     'file_id': file_id,
-        #                                     'source': 'message_annotation',
-        #                                     'agent_run_id': run_id
-        #                                 },
-        #                                 subfolder=file_subfolder
-        #                             )
-        #                             if upload['success']:
-        #                                 item_type = 'image' if inferred_ext in ['.png', '.jpg', '.jpeg', '.svg'] else 'file_output'
-        #                                 response_content.append({
-        #                                     'type': item_type,
-        #                                     'file_id': file_id,
-        #                                     'blob_url': upload['blob_url'],
-        #                                     'blob_path': upload['blob_path'],
-        #                                     **({'local_path': output_path} if output_path else {}),
-        #                                     'filename': output_filename,
-        #                                     'annotation_text': annotation_text,
-        #                                     'session_id': session_id
-        #                                 })
-        #                                 self.blob_service.mark_file_as_returned(upload['blob_path'])
-
-        #                             else:
-        #                                 response_content.append({
-        #                                     'type': 'file_output',
-        #                                     'file_id': file_id,
-        #                                     **({'local_path': output_path} if output_path else {}),
-        #                                     'filename': output_filename,
-        #                                     'annotation_text': annotation_text,
-        #                                     'blob_error': upload.get('error', 'Unknown error')
-        #                                 })
-        #                         else:
-        #                             response_content.append({
-        #                                 'type': 'file_output',
-        #                                 'file_id': file_id,
-        #                                 **({'local_path': output_path} if output_path else {}),
-        #                                 'filename': output_filename,
-        #                                 'annotation_text': annotation_text,
-        #                                 **({'note': 'local storage disabled'} if not output_path else {})
-        #                             })
-        #                     except Exception as e:
-        #                         logging.error(f"Failed to save file annotation {file_annotation.file_path.file_id}: {str(e)}")
-                    
-        #             # Look for code execution indicators in text content
-        #             if hasattr(msg, 'content'):
-        #                 for content_part in msg.content:
-        #                     if content_part.type == 'text' and hasattr(content_part, 'text'):
-        #                         text_value = content_part.text.value
-        #                         # Look for code blocks or execution indicators
-        #                         if "```python" in text_value or "matplotlib" in text_value.lower():
-        #                             # Only add once per message
-        #                             code_already_added = any(item.get("type") == "code_executed" for item in response_content)
-        #                             if not code_already_added:
-        #                                 response_content.append({
-        #                                     "type": "code_executed",
-        #                                     "code": "Python code execution detected in agent response"
-        #                                 })
-        #                             break
-                        
-        #     except Exception as e:
-        #         logging.error(f"Failed to process message contents: {str(e)}")
-
-        #     # Fallback: inspect run steps for artifacts and code when message lacks explicit image_file parts
-            # try:
-            #     self._capture_run_artifacts(
-            #         thread_id=thread_id,
-            #         run_id=run_id,
-            #         session_id=session_id,
-            #         images_dir=images_dir,
-            #         response_content=response_content
-            #     )
-            # except Exception as e:
-            #     logging.error(f"Run-step artifact capture failed: {str(e)}")
 
             return response_content
         except Exception as e:
@@ -1275,35 +1122,6 @@ class SessionService:
             logging.error(f"Failed to read Excel file: {str(e)}")
             return None
     
-    # def save_session(self, session_id: str, thread_id: str) -> None:
-    #     """Save session with thread ID to Excel file"""
-    #     try:
-    #         import pandas as pd
-            
-    #         # Read existing data
-    #         df = pd.read_excel(self.excel_file)
-            
-    #         # Check if session already exists
-    #         if session_id in df['session_id'].values:
-    #             # Update existing session
-    #             df.loc[df['session_id'] == session_id, 'thread_id'] = thread_id
-    #             logging.info(f"Updated existing session: {session_id} -> {thread_id}")
-    #         else:
-    #             # Add new session
-    #             new_row = pd.DataFrame({
-    #                 'thread_id': [thread_id],
-    #                 'session_id': [session_id]
-    #             })
-    #             df = pd.concat([df, new_row], ignore_index=True)
-    #             logging.info(f"Added new session: {session_id} -> {thread_id}")
-            
-    #         # Save back to Excel
-    #         df.to_excel(self.excel_file, index=False)
-    #         logging.info(f"Session saved to Excel file: {self.excel_file}")
-            
-    #     except Exception as e:
-    #         logging.error(f"Failed to save session to Excel file: {str(e)}")
-    #         raise
 
 
 class CosmosSessionService:
@@ -1379,129 +1197,7 @@ class CosmosSessionService:
             raise
 
 
-    # def migrate_file_ids_between_containers(
-    # self, 
-    # source_container_name: str, 
-    # target_container_name: str)-> Dict[str, Any]:
-    #     """
-    #     Migrate all file_ids from source container to target container.
-        
-    #     Args:
-    #         source_container_name: Name of source container to read from
-    #         target_container_name: Name of target container to write to
-            
-    #     Returns:
-    #         Dictionary with migration statistics
-    #     """
-    #     try:
-    #         # Get container references
-    #         source_container = self.database.get_container_client(source_container_name)
-    #         target_container = self.database.get_container_client(target_container_name)
-            
-    #         # Query all documents from source container
-    #         query = "SELECT * FROM c"
-    #         items = list(source_container.query_items(
-    #             query=query,
-    #             enable_cross_partition_query=True
-    #         ))
-            
-    #         logging.info(f"Found {len(items)} documents in source container: {source_container_name}")
-            
-    #         # Track statistics
-    #         stats = {
-    #             'total_documents': len(items),
-    #             'sessions_processed': 0,
-    #             'total_file_ids': 0,
-    #             'errors': []
-    #         }
-            
-    #         # Process each document
-    #         session_file_map = {}  # {session_id: [file_ids]}
-            
-    #         for doc in items:
-    #             try:
-    #                 session_id = doc.get('session_id')
-    #                 if not session_id:
-    #                     continue
-                    
-    #                 # Initialize file list for this session
-    #                 if session_id not in session_file_map:
-    #                     session_file_map[session_id] = []
-                    
-    #                 # Extract file_ids from various fields
-    #                 file_ids = []
-                    
-    #                 # Check uploaded_files array
-    #                 if 'uploaded_files' in doc and isinstance(doc['uploaded_files'], list):
-    #                     for file_entry in doc['uploaded_files']:
-    #                         if isinstance(file_entry, dict) and 'file_id' in file_entry:
-    #                             file_ids.append(file_entry['file_id'])
-    #                         elif isinstance(file_entry, str):
-    #                             file_ids.append(file_entry)
-                    
-    #                 # Check generated_files array
-    #                 if 'generated_files' in doc and isinstance(doc['generated_files'], list):
-    #                     for file_entry in doc['generated_files']:
-    #                         if isinstance(file_entry, dict) and 'file_id' in file_entry:
-    #                             file_ids.append(file_entry['file_id'])
-    #                         elif isinstance(file_entry, str):
-    #                             file_ids.append(file_entry)
-                    
-    #                 # Check for direct file_id field
-    #                 if 'file_id' in doc:
-    #                     file_ids.append(doc['file_id'])
-                    
-    #                 # Check for file_ids array field
-    #                 if 'file_ids' in doc and isinstance(doc['file_ids'], list):
-    #                     file_ids.extend(doc['file_ids'])
-                    
-    #                 # Add unique file_ids to session map
-    #                 session_file_map[session_id].extend(file_ids)
-                    
-    #             except Exception as e:
-    #                 error_msg = f"Error processing document {doc.get('id', 'unknown')}: {str(e)}"
-    #                 logging.error(error_msg)
-    #                 stats['errors'].append(error_msg)
-            
-    #         # Remove duplicates and write to target container
-    #         for session_id, file_ids in session_file_map.items():
-    #             try:
-    #                 # Remove duplicates
-    #                 unique_file_ids = list(set(file_ids))
-                    
-    #                 if unique_file_ids:
-    #                     # Create document for target container
-    #                     existing_files_doc = {
-    #                         "id": f"{session_id}_{int(time.time())}",
-    #                         "session_id": session_id,
-    #                         "file_ids": unique_file_ids,
-    #                         "added_at": datetime.now(timezone.utc).isoformat(),
-    #                         "type": "existing_files",
-    #                         "source": "migration",
-    #                         "migrated_from": source_container_name
-    #                     }
-                        
-    #                     # Write to target container
-    #                     target_container.upsert_item(existing_files_doc)
-                        
-    #                     stats['sessions_processed'] += 1
-    #                     stats['total_file_ids'] += len(unique_file_ids)
-                        
-    #                     logging.info(f"Migrated {len(unique_file_ids)} file IDs for session {session_id}")
-                        
-    #             except Exception as e:
-    #                 error_msg = f"Error migrating session {session_id}: {str(e)}"
-    #                 logging.error(error_msg)
-    #                 stats['errors'].append(error_msg)
-            
-    #         logging.info(f"Migration complete: {stats}")
-    #         return stats
-            
-    #     except Exception as e:
-    #         logging.error(f"Migration failed: {str(e)}")
-    #         raise
 
-    
     def get_thread_id(self, session_id: str) -> Optional[str]:
         logging.info(f"Retrieving thread ID function called in (cosmos service): {session_id}")
         """Get thread ID for a session from Cosmos DB with robust error handling"""
@@ -1892,34 +1588,6 @@ class CosmosSessionService:
             logging.error(f"Failed to log interaction to Cosmos DB: {str(e)}")
             # Don't raise here - logging failure shouldn't break the main flow
     
-    # def get_session_history(self, session_id: str, limit: int = 50) -> List[Dict]:
-    #     """Get interaction history for a session"""
-    #     try:
-    #         query = """
-    #             SELECT c.timestamp, c.query, c.response, c.file_ids, c.execution_time_seconds 
-    #             FROM c 
-    #             WHERE c.session_id = @session_id AND c.type = 'interaction_log'
-    #             ORDER BY c.timestamp DESC
-    #             OFFSET 0 LIMIT @limit
-    #         """
-    #         parameters = [
-    #             {"name": "@session_id", "value": session_id},
-    #             {"name": "@limit", "value": limit}
-    #         ]
-            
-    #         items = list(self.container.query_items(
-    #             query=query,
-    #             parameters=parameters,
-    #             enable_cross_partition_query=True,  # Required for cross-partition queries
-    #             populate_query_metrics=True        # Enable query metrics for debugging
-    #         ))
-            
-    #         logging.info(f"Retrieved {len(items)} interaction records for session: {session_id}")
-    #         return items
-            
-    #     except Exception as e:
-    #         logging.error(f"Failed to get session history from Cosmos DB: {str(e)}")
-    #         return []
 
 
 class HybridSessionService:
@@ -1980,15 +1648,6 @@ class HybridSessionService:
                 logging.error(f"Failed to log interaction to Cosmos DB: {str(e)}")
                 # Don't raise - logging failure shouldn't break the main flow
     
-    # def get_session_history(self, session_id: str, limit: int = 50) -> List[Dict]:
-    #     """Get session history from Cosmos DB"""
-    #     if self.cosmos_service:
-    #         try:
-    #             return self.cosmos_service.get_session_history(session_id, limit)
-    #         except Exception as e:
-    #             logging.error(f"Failed to get session history from Cosmos DB: {str(e)}")
-    #     return []
-
 
 
 
@@ -2064,17 +1723,7 @@ class ChatService:
                                        execution_time=execution_time,
                                        response_length=len(str(response_content)))
                     
-                    # Log interaction to Cosmos DB (if available)
-                    # if hasattr(self.session_service, 'log_interaction'):
-                    #     correlation.log_info("💾 Logging interaction to Cosmos DB")
-                    #     self.session_service.log_interaction(
-                    #         session_id=session_id,
-                    #         thread_id=thread_id,
-                    #         query=query,
-                    #         response=response_content,
-                    #         file_ids=file_ids or [],
-                    #         execution_time=execution_time
-                    #     )
+ 
                     
                     return {
                         "session_id": session_id,

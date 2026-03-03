@@ -59,14 +59,7 @@ except Exception as _telemetry_err:
 
 def get_cors_headers():
     """Get CORS headers for frontend integration"""
-    # Define allowed origins for CORS
-    # allowed_origins = [
-    #     "http://localhost:8080",  # Local development
-    #     "https://localhost:8080", # Local development with HTTPS
-    #     "http://localhost:5173",  # Vite dev server default
-    #     "https://localhost:5173", # Vite dev server with HTTPS
-    #     # Add your production frontend domain here when available
-    # ]
+
     allowed_origins = "*"  # Allow all origins for now; restrict in production
     
     # Get the origin from environment or request headers
@@ -116,12 +109,7 @@ async def chat_with_documents(req: Request):
     ctx = TRACER.start_as_current_span("data_analyst") if TRACER else nullcontext()
     with ctx as span:
         try:
-            # if span and hasattr(span, "set_attribute"):
-            #     span.set_attribute("fa.route", "data-analyst")
-            #     span.set_attribute("http.method", req.method)
-            #     span.set_attribute("http.scheme", "https" if str(req.url).startswith("https") else "http")
 
-            # Import models only when needed to avoid module loading issues
             from models import ChatService
             chat_service = ChatService()
             logging.info("🤖 ChatService initialized")
@@ -230,34 +218,7 @@ async def _handle_multipart_request(req: Request, chat_service):
                 headers=get_cors_headers()
             )
         
-        # Process uploaded files
-        # file_ids = []
-        # for file in files:
-        #     try:
-        #         file_content = file.read()
-        #         logging.info(f"📤 Uploading file: {file.filename} ({len(file_content)} bytes)")
-                
-        #         # Set session_id on foundry service before uploading
-        #         chat_service.foundry_service._current_session_id = session_id
-                
-        #         file_id = chat_service.foundry_service.upload_file_from_bytes(
-        #             file_content, 
-        #             file.filename
-        #         )
-        #         file_ids.append(file_id)
-        #         logging.info(f"✅ File uploaded successfully: {file.filename} -> {file_id}")
-                
 
-        #     except Exception as e:
-        #         logging.error(f"❌ File upload failed for {file.filename}: {str(e)}")
-        #         return func.HttpResponse(
-        #             json.dumps({"error": f"Failed to upload file {file.filename}: {str(e)}"}),
-        #             status_code=400,
-        #             mimetype="application/json",
-        #             headers=get_cors_headers()
-        #         )
-        
-        # Process the chat request
         logging.info("🤖 Starting AI chat completion with files")
         result = await chat_service.process_chat_request_with_files(
             session_id=session_id,
